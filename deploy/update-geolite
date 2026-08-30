@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+deploy_root=${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}
+config_file="$deploy_root/shared/secrets/GeoIP.conf"
+attempt=1
+maximum_attempts=4
+delay=2
+
+test -r "$config_file"
+
+while [ "$attempt" -le "$maximum_attempts" ]; do
+  if /usr/bin/geoipupdate -f "$config_file"; then
+    echo "GeoLite2 City actualizada en el intento $attempt."
+    exit 0
+  fi
+  if [ "$attempt" -eq "$maximum_attempts" ]; then
+    break
+  fi
+  echo "Actualización GeoLite2 falló; reintento $((attempt + 1))/$maximum_attempts en ${delay}s." >&2
+  sleep "$delay"
+  delay=$((delay * 2))
+  attempt=$((attempt + 1))
+done
+
+echo "GeoLite2 City no pudo actualizarse después de $maximum_attempts intentos." >&2
+exit 1

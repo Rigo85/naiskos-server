@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "Uso: $0 /ruta/al/postgres-globals.sql" >&2
+  exit 2
+fi
+
+source_file="$1"
+deploy_root="${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}"
+secrets_dir="${deploy_root}/shared/secrets"
+private_backup_root="${deploy_root}/shared/backups"
+key_file="${secrets_dir}/postgres-backup.key"
+encrypted_file="${source_file}.enc"
+encrypted_tmp="${encrypted_file}.tmp"
+source_name="$(basename "$(dirname "$source_file")")-$(basename "$source_file")"
+private_file="${private_backup_root}/${source_name}"
+
+if [[ ! -f "$source_file" ]]; then
+  echo "No existe el respaldo a proteger: $source_file" >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "$secrets_dir" "$private_backup_root"
+chmod 0700 "$secrets_dir" "$private_backup_root"
+if [[ ! -s "$key_file" ]]; then
+  openssl rand -hex 32 >"$key_file"
+fi
+chmod 0600 "$key_file"
+
+openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+  -pass "file:${key_file}" \
+  -in "$source_file" \
+  -out "$encrypted_tmp"
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+  -pass "file:${key_file}" \
+  -in "$encrypted_tmp" | cmp -s - "$source_file"
+mv "$encrypted_tmp" "$encrypted_file"
+mv "$source_file" "$private_file"
+chmod 0600 "$private_file"
+sha256sum "$encrypted_file" >"${private_file}.encrypted.sha256"
+chmod 0600 "${private_file}.encrypted.sha256"
+
+echo "Respaldo cifrado verificado; original trasladado al almacén privado."

@@ -1,0 +1,27 @@
+FROM ubuntu:24.04 AS build
+
+ARG TELEGRAM_BOT_API_REF
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates cmake g++ git gperf libssl-dev make zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN test -n "$TELEGRAM_BOT_API_REF" \
+ && git clone --recursive https://github.com/tdlib/telegram-bot-api.git /src \
+ && git -C /src checkout --detach "$TELEGRAM_BOT_API_REF" \
+ && git -C /src submodule update --init --recursive
+
+RUN cmake -S /src -B /src/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DTELEGRAM_BOT_API_ENABLE_LTO=OFF \
+ && cmake --build /src/build --target telegram-bot-api --parallel 2
+
+FROM ubuntu:24.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libssl3t64 zlib1g \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/build/telegram-bot-api /usr/local/bin/telegram-bot-api
+ENTRYPOINT ["/usr/local/bin/telegram-bot-api"]
+CMD ["--help"]

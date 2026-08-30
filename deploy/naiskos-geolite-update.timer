@@ -1,0 +1,12 @@
+[Unit]
+Description=Programar actualizaciones de GeoLite2 City para Naiskos
+
+[Timer]
+OnBootSec=5min
+OnCalendar=Mon,Thu *-*-* 04:17:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=naiskos-geolite-update.service
+
+[Install]
+WantedBy=timers.target

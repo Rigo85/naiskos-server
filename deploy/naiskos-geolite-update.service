@@ -1,0 +1,19 @@
+[Unit]
+Description=Actualizar la base GeoLite2 City de Naiskos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=naiskos
+Group=naiskos
+Environment=NAISKOS_DEPLOY_ROOT=/opt/naiskos-server
+ExecStart=/opt/naiskos-server/current/deploy/update-geolite
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/naiskos-server/shared/geoip
+
+[Install]
+WantedBy=multi-user.target

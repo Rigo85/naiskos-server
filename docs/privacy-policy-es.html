@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow, noarchive">
+    <title>Política de privacidad de Naiskos</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; background: #111318; color: #f5f6f7; line-height: 1.6; }
+      main { width: min(760px, calc(100% - 2rem)); margin: 0 auto; padding: 3rem 0 5rem; }
+      h1, h2 { line-height: 1.2; }
+      h1 { font-size: clamp(2rem, 7vw, 3.2rem); margin-bottom: .5rem; }
+      h2 { margin-top: 2.4rem; color: #d7f04b; }
+      a { color: #9ddcff; }
+      .meta { color: #b7bdc7; }
+      .notice { border-left: .3rem solid #d7f04b; padding: .75rem 1rem; background: #1c2028; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Política de privacidad de Naiskos</h1>
+      <p class="meta">Vigente desde el 30 de agosto de 2026 · Bot <strong>@naiskosbot</strong></p>
+      <p class="notice">Naiskos es un servicio privado administrado por su propietario y no forma parte de Telegram ni de Google.</p>
+
+      <h2>1. Alcance</h2>
+      <p>Esta política explica cómo Naiskos trata los datos recibidos mediante su bot de Telegram y los datos técnicos estrictamente necesarios para sincronización, diagnóstico y clima de marcos digitales privados. Telegram trata por separado los datos de sus usuarios según su <a href="https://telegram.org/privacy">política de privacidad</a>.</p>
+
+      <h2>2. Datos tratados</h2>
+      <ul>
+        <li>Identificador de usuario y chat, nombre visible y username cuando Telegram los proporciona.</li>
+        <li>Estado de autorización y marcos a los que tiene acceso el usuario.</li>
+        <li>Fotografías, videos, nombres de archivo y textos enviados al bot.</li>
+        <li>Destino, tamaño, tipo, duración, checksum y resultado técnico del procesamiento.</li>
+        <li>Fechas de recepción, procesamiento, sincronización, eliminación, errores y trazas de acciones relevantes.</li>
+        <li>Estado técnico del marco, versión, sincronización y capacidad.</li>
+        <li>BSSID de hasta 20 puntos Wi-Fi visibles, tratados transitoriamente para calcular la ubicación meteorológica, y coordenadas, precisión y zona horaria resultantes.</li>
+      </ul>
+      <p>El bot no solicita contraseña, agenda de contactos, ubicación, información de pago ni acceso general a la cuenta de Telegram.</p>
+      <p>Naiskos no recopila SSID, contraseñas Wi-Fi ni perfiles de red. Los BSSID no se guardan en PostgreSQL, archivos, auditoría ni logs. La IP pública no se conserva como ubicación del marco.</p>
+
+      <h2>3. Finalidades</h2>
+      <p>Los datos se utilizan para autorizar remitentes, vincularlos con marcos, procesar y entregar medios, informar resultados, sincronizar y restaurar contenido, prevenir duplicados y fallos, mantener auditoría y obtener automáticamente el clima local del marco.</p>
+      <p>Los datos no se venden, no se usan para publicidad y no se emplean para entrenar modelos de inteligencia artificial.</p>
+
+      <h2>4. Autorización y acceso</h2>
+      <p>Una persona sólo puede enviar contenido después de ser aprobada y obtener acceso a un marco mediante una invitación válida. Cada marco conserva una credencial independiente y revocable. Si una persona tiene varios marcos, Naiskos le permite elegir el destino.</p>
+
+      <h2>5. Conservación</h2>
+      <ul>
+        <li>Las invitaciones y selecciones pendientes vencen después de 24 horas.</li>
+        <li>El original recibido se conserva temporalmente y, de ordinario, hasta siete días después del procesamiento correcto.</li>
+        <li>La versión procesada se conserva mientras esté asignada o sea necesaria para recuperar un marco.</li>
+        <li>El contenido eliminado permanece 30 días en la papelera central, salvo que otro marco todavía lo use.</li>
+        <li>Las trazas de auditoría se conservan durante dos años.</li>
+        <li>Las coordenadas de Google se renuevan periódicamente y se eliminan si no pueden renovarse durante 30 días. El último clima válido se conserva localmente hasta seis horas.</li>
+      </ul>
+      <p>Los datos eliminados pueden permanecer temporalmente en copias de seguridad rotativas hasta su vencimiento.</p>
+
+      <h2>6. Almacenamiento y terceros</h2>
+      <p>Los metadatos y medios se almacenan en infraestructura administrada por el propietario. Telegram interviene como canal de recepción. Google Geolocation recibe BSSID visibles para producir coordenadas con el fallback por IP deshabilitado; Open-Meteo recibe esas coordenadas para producir el clima. Se aplican además las políticas de <a href="https://policies.google.com/privacy">Google</a>, <a href="https://cloud.google.com/maps-platform/terms">Google Maps Platform</a> y <a href="https://open-meteo.com/en/terms">Open-Meteo</a>. Naiskos no comercializa información.</p>
+
+      <h2>7. Seguridad</h2>
+      <p>Naiskos aplica credenciales revocables por marco, conexiones cifradas, comprobación de integridad, cambios atómicos de manifiesto, permisos restringidos, copias de seguridad, auditoría y secretos fuera del código fuente.</p>
+
+      <h2>8. Solicitudes del usuario</h2>
+      <p>El usuario puede solicitar acceso o corrección de sus datos, conocer o eliminar la ubicación meteorológica de su marco, revocar accesos, eliminar contenido o eliminar su relación activa con Naiskos, sujeto a las retenciones indicadas. Para iniciar una solicitud, use <strong>/privacy</strong> en <strong>@naiskosbot</strong>.</p>
+
+      <h2>9. Cambios</h2>
+      <p>Si esta política cambia de forma relevante, se actualizará la fecha de vigencia y se notificará a los usuarios autorizados cuando sea razonablemente posible.</p>
+    </main>
+  </body>
+</html>

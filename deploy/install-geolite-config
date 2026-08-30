@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+deploy_root=${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}
+node_bin=${NAISKOS_NODE_BIN:-/usr/bin/node}
+server_env="$deploy_root/shared/secrets/server.env"
+config_file="$deploy_root/shared/secrets/GeoIP.conf"
+database_dir="$deploy_root/shared/geoip"
+
+test -x "$node_bin"
+test -r "$server_env"
+install -d -m 700 "$database_dir"
+
+"$node_bin" --env-file="$server_env" -e '
+  const fs = require("node:fs");
+  const [configFile, databaseDirectory] = process.argv.slice(1);
+  const accountId = process.env.MAXMIND_ACCOUNT_ID;
+  const licenseKey = process.env.MAXMIND_LICENSE_KEY;
+  if (!/^\d+$/.test(accountId || "")) throw new Error("MAXMIND_ACCOUNT_ID inválido");
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(licenseKey || "")) {
+    throw new Error("MAXMIND_LICENSE_KEY inválida");
+  }
+  const value = [
+    `AccountID ${accountId}`,
+    `LicenseKey ${licenseKey}`,
+    "EditionIDs GeoLite2-City",
+    `DatabaseDirectory ${databaseDirectory}`,
+    `LockFile ${databaseDirectory}/.geoipupdate.lock`,
+    "",
+  ].join("\n");
+  fs.writeFileSync(configFile, value, { mode: 0o600 });
+' "$config_file" "$database_dir"
+chmod 600 "$config_file"
+
+echo "Configuración GeoLite2 instalada sin mostrar credenciales."

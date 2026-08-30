@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+read -r -s -p "Bot token de @naiskosbot: " bot_token
+echo
+
+if [[ ! "$bot_token" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; then
+  echo "El bot token no tiene el formato esperado." >&2
+  exit 1
+fi
+
+TELEGRAM_BOT_TOKEN="$bot_token" \
+  exec "${NAISKOS_NODE_BIN:-/usr/bin/node}" \
+  "${script_dir}/discover-telegram-admin.mjs"

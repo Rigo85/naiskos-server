@@ -1,0 +1,41 @@
+{
+  "name": "naiskos-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API central, bot Telegram y procesamiento de Naiskos",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/api-main.ts",
+    "start": "node dist/api-main.js",
+    "start:api": "node dist/api-main.js",
+    "start:worker": "node dist/worker-main.js",
+    "admin": "tsx src/admin-cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "migrate": "tsx src/migrate.ts",
+    "prepare:test-photos": "node scripts/prepare-photo-pilot.mjs",
+    "prepare:test-videos": "node scripts/prepare-video-pilot.mjs",
+    "test:full-pipeline": "node scripts/run-full-pipeline-pilot.mjs"
+  },
+  "dependencies": {
+    "fastify": "5.11.3",
+    "maxmind": "^5.0.7",
+    "pg": "8.22.0",
+    "qrcode": "1.5.4",
+    "sharp": "0.35.3",
+    "tz-lookup": "^6.1.25"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.13",
+    "@types/pg": "8.18.0",
+    "@types/qrcode": "1.5.6",
+    "@types/tz-lookup": "^6.1.2",
+    "tsx": "4.20.6",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

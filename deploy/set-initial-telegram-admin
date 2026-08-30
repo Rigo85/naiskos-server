@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 || ! "$1" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Uso: $0 TELEGRAM_USER_ID" >&2
+  exit 2
+fi
+
+admin_id="$1"
+deploy_root="${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}"
+server_env="${deploy_root}/shared/secrets/server.env"
+
+if [[ ! -r "$server_env" ]]; then
+  echo "No se puede leer $server_env" >&2
+  exit 1
+fi
+
+current_admins="$(sed -n 's/^TELEGRAM_ADMIN_IDS=//p' "$server_env")"
+line_count="$(grep -c '^TELEGRAM_ADMIN_IDS=' "$server_env" || true)"
+if [[ "$line_count" != "1" ]]; then
+  echo "server.env debe contener exactamente una línea TELEGRAM_ADMIN_IDS." >&2
+  exit 1
+fi
+if [[ -n "$current_admins" && "$current_admins" != "$admin_id" ]]; then
+  echo "Ya existe otro administrador; no se modificó el archivo." >&2
+  exit 1
+fi
+if [[ "$current_admins" == "$admin_id" ]]; then
+  echo "El administrador inicial ya estaba configurado."
+  exit 0
+fi
+
+umask 077
+server_tmp="$(mktemp "${server_env}.XXXXXX")"
+trap 'rm -f "$server_tmp"' EXIT
+awk -v admin_id="$admin_id" '
+  /^TELEGRAM_ADMIN_IDS=/ { print "TELEGRAM_ADMIN_IDS=" admin_id; next }
+  { print }
+' "$server_env" >"$server_tmp"
+chmod 0600 "$server_tmp"
+mv "$server_tmp" "$server_env"
+trap - EXIT
+
+echo "Administrador inicial configurado de forma atómica."

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+zfs_parent="${NAISKOS_ZFS_PARENT:?Define NAISKOS_ZFS_PARENT con el dataset padre}"
+dataset="${NAISKOS_ZFS_DATASET:-${zfs_parent}/naiskos}"
+storage_root="${NAISKOS_STORAGE_ROOT:-/var/lib/naiskos-server/storage}"
+service_user="${NAISKOS_SERVICE_USER:-naiskos}"
+service_group="${NAISKOS_SERVICE_GROUP:-${service_user}}"
+quota="${NAISKOS_ZFS_QUOTA:-250G}"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Ejecuta este script como un usuario administrativo; solicitará sudo sólo para ZFS y propiedad." >&2
+  exit 1
+fi
+if ! getent passwd "$service_user" >/dev/null; then
+  echo "No existe el usuario de servicio $service_user." >&2
+  exit 1
+fi
+if sudo zfs list "$dataset" >/dev/null 2>&1; then
+  echo "$dataset ya existe; no se modificó nada." >&2
+  exit 1
+fi
+
+sudo zfs create \
+  -o quota="$quota" \
+  -o compression=lz4 \
+  -o atime=off \
+  -o xattr=sa \
+  -o acltype=posixacl \
+  -o mountpoint="$storage_root" \
+  "$dataset"
+sudo zfs create -o recordsize=1M "${dataset}/objects"
+sudo zfs create -o recordsize=128K "${dataset}/telegram"
+sudo zfs create -o recordsize=128K "${dataset}/temp"
+sudo chown -R "$service_user:$service_group" "$storage_root"
+chmod 0750 "$storage_root"
+mkdir -p \
+  "${storage_root}/telegram/data" \
+  "${storage_root}/temp/telegram-bot-api"
+chmod 0750 \
+  "${storage_root}/objects" \
+  "${storage_root}/telegram" \
+  "${storage_root}/temp"
+sudo zfs snapshot -r "${dataset}@initial-empty"
+
+echo "Dataset $dataset creado sin modificar propiedades del dataset padre."

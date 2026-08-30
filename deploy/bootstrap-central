@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deploy_root="${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}"
+release_root="${deploy_root}/current"
+telegram_source="${deploy_root}/shared/secrets/telegram-source.env"
+secrets_dir="${deploy_root}/shared/secrets"
+backup_base="${NAISKOS_BACKUP_ROOT:-/var/backups/naiskos}"
+backup_root="${backup_base}/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+node="${NAISKOS_NODE_BIN:-/usr/bin/node}"
+postgres_container="${NAISKOS_POSTGRES_CONTAINER:-postgres}"
+service_host="${NAISKOS_HOST:-127.0.0.1}"
+service_port="${NAISKOS_PORT:-8090}"
+public_url="${NAISKOS_PUBLIC_URL:-http://127.0.0.1:${service_port}}"
+storage_root="${NAISKOS_STORAGE_ROOT:-${deploy_root}/shared/storage}"
+trusted_proxies="${NAISKOS_TRUSTED_PROXIES:-127.0.0.1}"
+telegram_api_base="${TELEGRAM_API_BASE:-http://127.0.0.1:8092}"
+telegram_bot_username="${NAISKOS_TELEGRAM_BOT_USERNAME:-naiskosbot}"
+
+if [[ ! -r "$telegram_source" ]]; then
+  echo "Falta $telegram_source" >&2
+  exit 1
+fi
+if [[ ! -f "$release_root/dist/migrate.js" ]]; then
+  echo "El release central no está compilado o el enlace current es inválido." >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$telegram_source"
+set +a
+if [[ ! "${TELEGRAM_API_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TELEGRAM_API_ID inválido." >&2
+  exit 1
+fi
+if [[ ! "${TELEGRAM_API_HASH:-}" =~ ^[A-Fa-f0-9]{32}$ ]]; then
+  echo "TELEGRAM_API_HASH inválido." >&2
+  exit 1
+fi
+if [[ ! "${TELEGRAM_BOT_TOKEN:-}" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; then
+  echo "TELEGRAM_BOT_TOKEN inválido." >&2
+  exit 1
+fi
+
+state="$(docker exec "$postgres_container" psql -U postgres -d postgres -Atc \
+  "select (select count(*) from pg_database where datname='naiskos') || ':' ||
+          (select count(*) from pg_roles where rolname in ('naiskos_owner','naiskos_app','naiskos_readonly'));")"
+if [[ "$state" != "0:0" ]]; then
+  echo "La base o los roles de Naiskos ya existen ($state); no se modificó nada." >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "$secrets_dir" "$backup_root"
+chmod 0700 "$secrets_dir" "$backup_root"
+docker exec "$postgres_container" pg_dumpall -U postgres --globals-only >"$backup_root/postgres-globals.sql"
+chmod 0600 "$backup_root/postgres-globals.sql"
+"$release_root/deploy/protect-postgres-backup" "$backup_root/postgres-globals.sql"
+
+owner_password="$(openssl rand -hex 32)"
+app_password="$(openssl rand -hex 32)"
+webhook_secret="$(openssl rand -hex 32)"
+server_tmp="$(mktemp "${secrets_dir}/server.env.XXXXXX")"
+migration_tmp="$(mktemp "${secrets_dir}/migration.env.XXXXXX")"
+bot_tmp="$(mktemp "${secrets_dir}/bot-api.env.XXXXXX")"
+trap 'rm -f "$server_tmp" "$migration_tmp" "$bot_tmp"' EXIT
+
+printf '%s\n' \
+  "NAISKOS_HOST=${service_host}" \
+  "NAISKOS_PORT=${service_port}" \
+  "NAISKOS_PUBLIC_URL=${public_url}" \
+  "DATABASE_URL='postgresql://naiskos_app:${app_password}@127.0.0.1:5432/naiskos'" \
+  "NAISKOS_DB_POOL_MAX=4" \
+  "NAISKOS_STORAGE_ROOT=${storage_root}" \
+  "NAISKOS_TRUSTED_PROXIES=${trusted_proxies}" \
+  "TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'" \
+  "TELEGRAM_WEBHOOK_SECRET=${webhook_secret}" \
+  "TELEGRAM_API_BASE=${telegram_api_base}" \
+  "TELEGRAM_ADMIN_IDS=" \
+  "NAISKOS_TELEGRAM_BOT_USERNAME=${telegram_bot_username}" \
+  "NAISKOS_WORKER_INTERVAL_MS=1000" \
+  "NAISKOS_ORIGINAL_RETENTION_DAYS=7" \
+  "NAISKOS_TRASH_RETENTION_DAYS=30" >"$server_tmp"
+printf '%s\n' \
+  "DATABASE_URL='postgresql://naiskos_owner:${owner_password}@127.0.0.1:5432/naiskos'" \
+  "NAISKOS_DB_POOL_MAX=2" >"$migration_tmp"
+printf '%s\n' \
+  "TELEGRAM_API_ID=${TELEGRAM_API_ID}" \
+  "TELEGRAM_API_HASH='${TELEGRAM_API_HASH}'" >"$bot_tmp"
+chmod 0600 "$server_tmp" "$migration_tmp" "$bot_tmp"
+
+{
+  printf "\\set naiskos_owner_password '%s'\n" "$owner_password"
+  printf "\\set naiskos_app_password '%s'\n" "$app_password"
+  sed -n '1,240p' "$release_root/database/bootstrap.sql"
+} | docker exec -i "$postgres_container" psql -U postgres -d postgres -f -
+
+mv "$server_tmp" "$secrets_dir/server.env"
+mv "$migration_tmp" "$secrets_dir/migration.env"
+mv "$bot_tmp" "$secrets_dir/bot-api.env"
+trap - EXIT
+
+set -a
+# shellcheck disable=SC1090
+source "$secrets_dir/migration.env"
+set +a
+cd "$release_root"
+"$node" dist/migrate.js
+
+unset owner_password app_password webhook_secret TELEGRAM_BOT_TOKEN TELEGRAM_API_HASH
+echo "Bootstrap central y migraciones completados. Backup previo cifrado: $backup_root/postgres-globals.sql.enc"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deploy_root="${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}"
+secret_file="${deploy_root}/shared/secrets/bot-api.env"
+binary="${deploy_root}/shared/bin/telegram-bot-api"
+storage_root="${NAISKOS_STORAGE_ROOT:-${deploy_root}/shared/storage}"
+data_dir="${NAISKOS_TELEGRAM_DATA_DIR:-${storage_root}/telegram/data}"
+temp_dir="${NAISKOS_TELEGRAM_TEMP_DIR:-${storage_root}/temp/telegram-bot-api}"
+
+if [[ ! -r "$secret_file" ]]; then
+  echo "No se puede leer $secret_file" >&2
+  exit 1
+fi
+if [[ ! -x "$binary" ]]; then
+  echo "No se puede ejecutar $binary" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$secret_file"
+set +a
+
+if [[ -z "${TELEGRAM_API_ID:-}" || -z "${TELEGRAM_API_HASH:-}" ]]; then
+  echo "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH" >&2
+  exit 1
+fi
+
+mkdir -p "$data_dir" "$temp_dir"
+exec "$binary" \
+  --local \
+  --http-ip-address=127.0.0.1 \
+  --http-port=8092 \
+  --dir="$data_dir" \
+  --temp-dir="$temp_dir"
