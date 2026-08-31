@@ -322,6 +322,12 @@ export async function buildApp(
       state: string;
       manifestVersion: number;
       diskUsedPercent: number;
+      diskTotalBytes?: number;
+      diskUsedBytes?: number;
+      diskAvailableBytes?: number;
+      diskReservedBytes?: number;
+      frameDataBytes?: number;
+      mediaDataBytes?: number;
       lastError: string | null;
       lastSyncAt: string | null;
     };
@@ -333,7 +339,8 @@ export async function buildApp(
     if (
       !body ||
       !Number.isSafeInteger(body.manifestVersion) ||
-      !Number.isFinite(body.diskUsedPercent)
+      !Number.isFinite(body.diskUsedPercent) ||
+      !storageTelemetryIsValid(body)
     ) {
       return reply.code(400).send({ error: "Telemetría inválida" });
     }
@@ -342,6 +349,27 @@ export async function buildApp(
   });
 
   return app;
+}
+
+function storageTelemetryIsValid(body: {
+  diskTotalBytes?: number;
+  diskUsedBytes?: number;
+  diskAvailableBytes?: number;
+  diskReservedBytes?: number;
+  frameDataBytes?: number;
+  mediaDataBytes?: number;
+}): boolean {
+  return [
+    body.diskTotalBytes,
+    body.diskUsedBytes,
+    body.diskAvailableBytes,
+    body.diskReservedBytes,
+    body.frameDataBytes,
+    body.mediaDataBytes,
+  ].every(
+    (value) =>
+      value === undefined || (Number.isSafeInteger(value) && value >= 0),
+  );
 }
 
 function parseRange(

@@ -18,6 +18,12 @@ versiones y cola de trabajo. El almacenamiento de objetos permanece fuera de
 las releases. El Telegram Bot API local es opcional: también puede utilizarse
 la API HTTPS oficial configurando `TELEGRAM_API_BASE`.
 
+La telemetría de cada marco conserva capacidad, espacio realmente usado,
+disponible y reservado del filesystem, además del peso total de la data local
+y de sus medios. El porcentaje usa la misma fórmula que `df`; las columnas son
+opcionales para mantener compatibilidad durante la actualización gradual de
+agentes anteriores.
+
 ## Requisitos
 
 - Node.js 24 y npm 11.

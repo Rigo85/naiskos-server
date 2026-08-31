@@ -1266,23 +1266,45 @@ export class Repository {
       state: string;
       manifestVersion: number;
       diskUsedPercent: number;
+      diskTotalBytes?: number;
+      diskUsedBytes?: number;
+      diskAvailableBytes?: number;
+      diskReservedBytes?: number;
+      frameDataBytes?: number;
+      mediaDataBytes?: number;
       lastError: string | null;
       lastSyncAt: string | null;
     },
   ): Promise<void> {
     await this.database.query(
       `INSERT INTO naiskos.frame_runtime
-         (frame_id, installed_version, agent_state, disk_used_percent, last_error, last_seen_at, last_sync_at)
-       VALUES ($1,$2,$3,$4,$5,now(),$6)
+         (frame_id, installed_version, agent_state, disk_used_percent,
+          disk_total_bytes, disk_used_bytes, disk_available_bytes,
+          disk_reserved_bytes, frame_data_bytes, media_data_bytes,
+          last_error, last_seen_at, last_sync_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),$12)
        ON CONFLICT (frame_id) DO UPDATE SET
          installed_version=EXCLUDED.installed_version, agent_state=EXCLUDED.agent_state,
-         disk_used_percent=EXCLUDED.disk_used_percent, last_error=EXCLUDED.last_error,
+         disk_used_percent=EXCLUDED.disk_used_percent,
+         disk_total_bytes=COALESCE(EXCLUDED.disk_total_bytes, naiskos.frame_runtime.disk_total_bytes),
+         disk_used_bytes=COALESCE(EXCLUDED.disk_used_bytes, naiskos.frame_runtime.disk_used_bytes),
+         disk_available_bytes=COALESCE(EXCLUDED.disk_available_bytes, naiskos.frame_runtime.disk_available_bytes),
+         disk_reserved_bytes=COALESCE(EXCLUDED.disk_reserved_bytes, naiskos.frame_runtime.disk_reserved_bytes),
+         frame_data_bytes=COALESCE(EXCLUDED.frame_data_bytes, naiskos.frame_runtime.frame_data_bytes),
+         media_data_bytes=COALESCE(EXCLUDED.media_data_bytes, naiskos.frame_runtime.media_data_bytes),
+         last_error=EXCLUDED.last_error,
          last_seen_at=now(), last_sync_at=EXCLUDED.last_sync_at`,
       [
         frameId,
         telemetry.manifestVersion,
         telemetry.state,
         telemetry.diskUsedPercent,
+        telemetry.diskTotalBytes ?? null,
+        telemetry.diskUsedBytes ?? null,
+        telemetry.diskAvailableBytes ?? null,
+        telemetry.diskReservedBytes ?? null,
+        telemetry.frameDataBytes ?? null,
+        telemetry.mediaDataBytes ?? null,
         telemetry.lastError,
         telemetry.lastSyncAt,
       ],
