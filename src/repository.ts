@@ -968,11 +968,15 @@ export class Repository {
               encode(v.sha256, 'hex') AS sha256,
               v.size_bytes::double precision AS "sizeBytes", pv.id AS "posterVariantId",
               pv.extension AS "posterExtension", encode(pv.sha256, 'hex') AS "posterSha256",
-              pv.size_bytes::double precision AS "posterSizeBytes"
+              pv.size_bytes::double precision AS "posterSizeBytes",
+              tv.id AS "thumbnailVariantId", tv.extension AS "thumbnailExtension",
+              encode(tv.sha256, 'hex') AS "thumbnailSha256",
+              tv.size_bytes::double precision AS "thumbnailSizeBytes"
          FROM naiskos.frame_media fm
          JOIN naiskos.media m ON m.id = fm.media_id
          JOIN naiskos.media_variants v ON v.id = fm.variant_id
          LEFT JOIN naiskos.media_variants pv ON pv.id = fm.poster_variant_id
+         LEFT JOIN naiskos.media_variants tv ON tv.id = fm.thumbnail_variant_id
          LEFT JOIN naiskos.telegram_users u ON u.id = m.sender_telegram_user_id
         WHERE fm.frame_id = $1 AND fm.deleted_at IS NULL
           AND fm.sync_status = 'active' AND m.status = 'ready'
@@ -996,6 +1000,9 @@ export class Repository {
         downloadUrl: `${publicUrl}/api/v1/files/${row.variantId as string}`,
         posterDownloadUrl: row.posterVariantId
           ? `${publicUrl}/api/v1/files/${row.posterVariantId as string}`
+          : null,
+        thumbnailDownloadUrl: row.thumbnailVariantId
+          ? `${publicUrl}/api/v1/files/${row.thumbnailVariantId as string}`
           : null,
       })),
     };
@@ -1270,7 +1277,10 @@ export class Repository {
     }>(
       `SELECT v.storage_path AS "storagePath", v.mime_type AS "mimeType"
          FROM naiskos.media_variants v
-         JOIN naiskos.frame_media fm ON fm.variant_id = v.id OR fm.poster_variant_id = v.id
+         JOIN naiskos.frame_media fm
+           ON fm.variant_id = v.id
+           OR fm.poster_variant_id = v.id
+           OR fm.thumbnail_variant_id = v.id
         WHERE fm.frame_id = $1 AND v.id = $2 AND fm.deleted_at IS NULL LIMIT 1`,
       [frameId, variantId],
     );

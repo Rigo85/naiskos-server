@@ -18,6 +18,7 @@ import sharp from "sharp";
 import { ServerConfig } from "./config.js";
 import { Database, transaction } from "./db.js";
 import {
+  createMediaThumbnail,
   createPhotoDisplayMaster,
   createRotatedPhotoVariant,
 } from "./image-processing.js";
@@ -38,7 +39,7 @@ interface ClaimedJob {
 }
 
 interface StoredVariant {
-  purpose: "original" | "display" | "poster";
+  purpose: "original" | "display" | "poster" | "thumbnail";
   sha256: Buffer;
   storagePath: string;
   extension: string;
@@ -214,7 +215,9 @@ export class MediaWorker {
       let variants: StoredVariant[];
       if (job.payload.kind === "photo") {
         const display = path.join(temporaryRoot, "display.webp");
+        const thumbnail = path.join(temporaryRoot, "thumbnail.webp");
         await createPhotoDisplayMaster(input, display);
+        const thumbnailMetadata = await createMediaThumbnail(display, thumbnail);
         const metadata = await sharp(display).metadata();
         variants = [
           await this.storeVariant(
@@ -231,11 +234,21 @@ export class MediaWorker {
             metadata.width ?? null,
             metadata.height ?? null,
           ),
+          await this.storeVariant(
+            thumbnail,
+            "thumbnail",
+            ".webp",
+            "image/webp",
+            thumbnailMetadata.width,
+            thumbnailMetadata.height,
+          ),
         ];
       } else {
         const display = path.join(temporaryRoot, "display.mp4");
         const poster = path.join(temporaryRoot, "poster.jpg");
+        const thumbnail = path.join(temporaryRoot, "thumbnail.webp");
         const result = await createVideoRenditions(input, display, poster);
+        const thumbnailMetadata = await createMediaThumbnail(poster, thumbnail);
         variants = [
           await this.storeVariant(
             input,
@@ -254,6 +267,14 @@ export class MediaWorker {
           ),
 
           await this.storeVariant(poster, "poster", ".jpg", "image/jpeg"),
+          await this.storeVariant(
+            thumbnail,
+            "thumbnail",
+            ".webp",
+            "image/webp",
+            thumbnailMetadata.width,
+            thumbnailMetadata.height,
+          ),
         ];
       }
 
@@ -384,6 +405,19 @@ export class MediaWorker {
           [frameId, mediaId],
         );
         if (existing.rows[0] && existing.rows[0].deletedAt === null) {
+          const thumbnailUpdated = await client.query(
+            `UPDATE naiskos.frame_media
+                SET thumbnail_variant_id=$3
+              WHERE frame_id=$1 AND media_id=$2
+                AND thumbnail_variant_id IS DISTINCT FROM $3`,
+            [frameId, mediaId, ids.get("thumbnail") ?? null],
+          );
+          if (thumbnailUpdated.rowCount) {
+            await client.query(
+              "UPDATE naiskos.frames SET manifest_version=manifest_version+1, updated_at=now() WHERE id=$1",
+              [frameId],
+            );
+          }
           result.duplicates += 1;
           continue;
         }
@@ -395,16 +429,19 @@ export class MediaWorker {
         const pendingCapacity = Number(runtime.rows[0]?.diskUsedPercent ?? 0) >= 90;
         await client.query(
           `INSERT INTO naiskos.frame_media
-             (frame_id, media_id, variant_id, poster_variant_id, position, sync_status)
-           VALUES ($1, $2, $3, $4, -extract(epoch FROM now())::bigint, $5)
+             (frame_id, media_id, variant_id, poster_variant_id,
+              thumbnail_variant_id, position, sync_status)
+           VALUES ($1, $2, $3, $4, $5, -extract(epoch FROM now())::bigint, $6)
            ON CONFLICT (frame_id, media_id) DO UPDATE SET
              variant_id=EXCLUDED.variant_id, poster_variant_id=EXCLUDED.poster_variant_id,
+             thumbnail_variant_id=EXCLUDED.thumbnail_variant_id,
              deleted_at=NULL, purge_after=NULL, sync_status=EXCLUDED.sync_status`,
           [
             frameId,
             mediaId,
             ids.get("display"),
             ids.get("poster") ?? null,
+            ids.get("thumbnail") ?? null,
             pendingCapacity ? "pending_capacity" : "active",
           ],
         );
@@ -474,21 +511,26 @@ export class MediaWorker {
 
       const existing = await this.database.query<{ purpose: string }>(
         `SELECT purpose FROM naiskos.media_variants
-          WHERE media_id=$1 AND purpose IN ('display', 'poster')
+          WHERE media_id=$1 AND purpose IN ('display', 'poster', 'thumbnail')
             AND rotation_degrees=$2`,
         [job.payload.mediaId, job.payload.rotationDegrees],
       );
       const hasDisplay = existing.rows.some((row) => row.purpose === "display");
       const hasPoster = existing.rows.some((row) => row.purpose === "poster");
-      if (!hasDisplay || (source.kind === "video" && !hasPoster)) {
+      const hasThumbnail = existing.rows.some(
+        (row) => row.purpose === "thumbnail",
+      );
+      if (!hasDisplay || !hasThumbnail || (source.kind === "video" && !hasPoster)) {
         const input = path.join(this.config.storageRoot, source.displayPath);
         if (source.kind === "photo") {
           const display = path.join(temporaryRoot, "display.webp");
+          const thumbnail = path.join(temporaryRoot, "thumbnail.webp");
           const metadata = await createRotatedPhotoVariant(
             input,
             display,
             job.payload.rotationDegrees,
           );
+          const thumbnailMetadata = await createMediaThumbnail(display, thumbnail);
           const variant = await this.storeVariant(
             display,
             "display",
@@ -498,16 +540,30 @@ export class MediaWorker {
             metadata.height,
           );
           variant.rotationDegrees = job.payload.rotationDegrees;
-          await this.publishRotationVariants(job.payload.mediaId, [variant]);
+          const thumbnailVariant = await this.storeVariant(
+            thumbnail,
+            "thumbnail",
+            ".webp",
+            "image/webp",
+            thumbnailMetadata.width,
+            thumbnailMetadata.height,
+          );
+          thumbnailVariant.rotationDegrees = job.payload.rotationDegrees;
+          await this.publishRotationVariants(job.payload.mediaId, [
+            variant,
+            thumbnailVariant,
+          ]);
         } else {
           const display = path.join(temporaryRoot, "display.mp4");
           const poster = path.join(temporaryRoot, "poster.jpg");
+          const thumbnail = path.join(temporaryRoot, "thumbnail.webp");
           const result = await createRotatedVideoRenditions(
             input,
             display,
             poster,
             job.payload.rotationDegrees,
           );
+          const thumbnailMetadata = await createMediaThumbnail(poster, thumbnail);
           const displayVariant = await this.storeVariant(
             display,
             "display",
@@ -525,9 +581,19 @@ export class MediaWorker {
             "image/jpeg",
           );
           posterVariant.rotationDegrees = job.payload.rotationDegrees;
+          const thumbnailVariant = await this.storeVariant(
+            thumbnail,
+            "thumbnail",
+            ".webp",
+            "image/webp",
+            thumbnailMetadata.width,
+            thumbnailMetadata.height,
+          );
+          thumbnailVariant.rotationDegrees = job.payload.rotationDegrees;
           await this.publishRotationVariants(job.payload.mediaId, [
             displayVariant,
             posterVariant,
+            thumbnailVariant,
           ]);
         }
       }
@@ -606,22 +672,29 @@ export class MediaWorker {
       const variants = await client.query<{ purpose: string; id: string }>(
         `SELECT purpose, id FROM naiskos.media_variants
           WHERE media_id=$1 AND rotation_degrees=$2
-            AND purpose IN ('display', 'poster')`,
+            AND purpose IN ('display', 'poster', 'thumbnail')`,
         [job.payload.mediaId, job.payload.rotationDegrees],
       );
       const displayId = variants.rows.find((row) => row.purpose === "display")?.id;
       const posterId = variants.rows.find((row) => row.purpose === "poster")?.id ?? null;
+      const thumbnailId =
+        variants.rows.find((row) => row.purpose === "thumbnail")?.id ?? null;
       if (!displayId) throw new Error("La variante rotada no quedó disponible");
       const updated = await client.query(
         `UPDATE naiskos.frame_media
-            SET variant_id=$3, poster_variant_id=$4, rotation_degrees=$5
+            SET variant_id=$3, poster_variant_id=$4,
+                thumbnail_variant_id=$5, rotation_degrees=$6
           WHERE frame_id=$1 AND media_id=$2 AND deleted_at IS NULL
-            AND (rotation_degrees IS DISTINCT FROM $5 OR variant_id IS DISTINCT FROM $3)`,
+            AND (rotation_degrees IS DISTINCT FROM $6
+              OR variant_id IS DISTINCT FROM $3
+              OR poster_variant_id IS DISTINCT FROM $4
+              OR thumbnail_variant_id IS DISTINCT FROM $5)`,
         [
           job.payload.frameId,
           job.payload.mediaId,
           displayId,
           posterId,
+          thumbnailId,
           job.payload.rotationDegrees,
         ],
       );

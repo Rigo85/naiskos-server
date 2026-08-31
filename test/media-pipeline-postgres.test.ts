@@ -169,6 +169,14 @@ describe.skipIf(!database || !photoPath || !videoPath)(
           expect(typeof video.sizeBytes).toBe("number");
           expect(typeof video.durationSeconds).toBe("number");
           expect(typeof video.posterSizeBytes).toBe("number");
+          expect(typeof photo.thumbnailSizeBytes).toBe("number");
+          expect(typeof video.thumbnailSizeBytes).toBe("number");
+          expect(String(photo.thumbnailDownloadUrl)).toMatch(
+            /^https:\/\/naiskos\.test\/api\/v1\/files\//,
+          );
+          expect(String(video.thumbnailDownloadUrl)).toMatch(
+            /^https:\/\/naiskos\.test\/api\/v1\/files\//,
+          );
           const productionSettings = {
             photoDurationSeconds: 47,
             fadeDurationMs: 321,
@@ -234,7 +242,7 @@ describe.skipIf(!database || !photoPath || !videoPath)(
               WHERE m.source_unique_id=ANY($1::text[])`,
             [[photoUniqueId, videoUniqueId]],
           );
-          expect(variants.rows).toHaveLength(8);
+          expect(variants.rows).toHaveLength(12);
           for (const variant of variants.rows) {
             const contents = await readFile(
               path.join(storageRoot, variant.storagePath),

@@ -150,6 +150,14 @@ Fotografías:
 - resolución suficiente para alternar `contain` y `cover` en el marco;
 - nombre direccionado por SHA-256.
 
+Galería:
+
+- miniatura WebP 320×240, `cover` centrado y calidad 75;
+- creada desde el display normalizado de una foto o el póster de un video;
+- una por rotación, sin sustituir las variantes de presentación;
+- backfill secuencial e idempotente con `npm run backfill:thumbnails -- --dry-run`
+  y activación real con `npm run backfill:thumbnails`.
+
 Videos:
 
 - validación con FFprobe y límite predeterminado de 120 segundos;

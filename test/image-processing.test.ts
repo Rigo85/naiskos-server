@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  createMediaThumbnail,
   createPhotoDisplayMaster,
   createRotatedPhotoVariant,
 } from "../src/image-processing.js";
@@ -18,6 +19,25 @@ afterEach(async () => {
       rm(directory, { recursive: true, force: true }),
     ),
   );
+});
+
+describe("createMediaThumbnail", () => {
+  it("produce un WebP 4:3 pequeño para la cuadrícula", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "naiskos-thumbnail-"));
+    temporaryRoots.push(directory);
+    const input = path.join(directory, "display.webp");
+    const output = path.join(directory, "thumbnail.webp");
+    await sharp({
+      create: { width: 1_280, height: 1_920, channels: 3, background: "#654321" },
+    })
+      .webp()
+      .toFile(input);
+
+    await createMediaThumbnail(input, output);
+
+    const metadata = await sharp(output).metadata();
+    expect(metadata).toMatchObject({ format: "webp", width: 320, height: 240 });
+  });
 });
 
 async function convert(width: number, height: number) {
