@@ -205,6 +205,12 @@ Flujo recomendado:
 modifica sus propiedades. Los scripts abortan ante recursos ya existentes;
 revísalos para la plataforma concreta antes de ejecutarlos.
 
+`deploy/install-backup` prepara un repositorio Restic cifrado en un disco
+distinto, snapshots ZFS con retención y una prueba de restauración que sólo
+acepta rutas y bases desechables. El timer queda deshabilitado hasta validar el
+primer recorrido. Consulta
+[`docs/backup-and-restore.md`](docs/backup-and-restore.md).
+
 ## Seguridad y publicación
 
 - `.env`, `storage/`, `dist/`, logs, bases GeoLite y respaldos están fuera de

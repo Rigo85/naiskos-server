@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+backup_config="${NAISKOS_BACKUP_CONFIG:-/etc/naiskos/backup.env}"
+if [[ -r "$backup_config" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$backup_config"
+  set +a
+fi
+
+backup_mount="${NAISKOS_BACKUP_MOUNT:?Falta NAISKOS_BACKUP_MOUNT}"
+expected_uuid="${NAISKOS_BACKUP_DEVICE_UUID:?Falta NAISKOS_BACKUP_DEVICE_UUID}"
+dataset="${NAISKOS_ZFS_DATASET:?Falta NAISKOS_ZFS_DATASET}"
+storage_root="${NAISKOS_STORAGE_ROOT:?Falta NAISKOS_STORAGE_ROOT}"
+postgres_container="${NAISKOS_POSTGRES_CONTAINER:?Falta NAISKOS_POSTGRES_CONTAINER}"
+database_name="${NAISKOS_DATABASE:-naiskos}"
+postgres_admin="${NAISKOS_POSTGRES_ADMIN:-postgres}"
+dump_file="${NAISKOS_DB_DUMP_FILE:?Falta NAISKOS_DB_DUMP_FILE}"
+secrets_root="${NAISKOS_SECRETS_ROOT:?Falta NAISKOS_SECRETS_ROOT}"
+backup_host="${NAISKOS_BACKUP_HOST:-$(hostname -s)}"
+zfs_retention_days="${NAISKOS_ZFS_RETENTION_DAYS:-30}"
+keep_daily="${NAISKOS_RESTIC_KEEP_DAILY:-30}"
+keep_weekly="${NAISKOS_RESTIC_KEEP_WEEKLY:-12}"
+keep_monthly="${NAISKOS_RESTIC_KEEP_MONTHLY:-12}"
+lock_file="${NAISKOS_BACKUP_LOCK_FILE:-/run/lock/naiskos-backup.lock}"
+source_root="${NAISKOS_BACKUP_SOURCE_ROOT:-/run/naiskos-backup-source}"
+
+: "${RESTIC_REPOSITORY:?Falta RESTIC_REPOSITORY}"
+: "${RESTIC_PASSWORD_FILE:?Falta RESTIC_PASSWORD_FILE}"
+: "${RESTIC_CACHE_DIR:?Falta RESTIC_CACHE_DIR}"
+export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_CACHE_DIR
+
+for command_name in docker findmnt flock lsblk mount pg_restore restic umount zfs; do
+  command -v "$command_name" >/dev/null || {
+    echo "Falta el comando requerido: $command_name" >&2
+    exit 1
+  }
+done
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "El backup debe ejecutarse como root mediante systemd." >&2
+  exit 1
+fi
+if [[ ! "$dump_file" = /* || "$dump_file" == "/" || ! "$secrets_root" = /* || "$secrets_root" == "/" ]]; then
+  echo "Las rutas de dump y secretos deben ser absolutas y específicas." >&2
+  exit 1
+fi
+if [[ ! "$source_root" =~ ^/run/naiskos-backup-[A-Za-z0-9_-]+$ ]]; then
+  echo "NAISKOS_BACKUP_SOURCE_ROOT debe ser una ruta específica bajo /run." >&2
+  exit 1
+fi
+if ! mountpoint -q "$backup_mount"; then
+  echo "El destino de backup no está montado: $backup_mount" >&2
+  exit 1
+fi
+
+mounted_source="$(findmnt -n -o SOURCE -T "$backup_mount")"
+mounted_uuid="$(lsblk -ndo UUID "$mounted_source" | tr -d '[:space:]')"
+if [[ -z "$mounted_uuid" || "$mounted_uuid" != "$expected_uuid" ]]; then
+  echo "El UUID montado en $backup_mount no coincide con el autorizado." >&2
+  exit 1
+fi
+if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then
+  echo "No existe el archivo de contraseña Restic." >&2
+  exit 1
+fi
+if [[ ! -d "$secrets_root" ]]; then
+  echo "No existe el directorio de secretos a proteger." >&2
+  exit 1
+fi
+install -d -m 0700 "$RESTIC_CACHE_DIR"
+if ! zfs list -H "$dataset" >/dev/null; then
+  echo "No existe el dataset esperado: $dataset" >&2
+  exit 1
+fi
+if [[ "$(zfs get -H -o value mountpoint "$dataset")" != "$storage_root" ]]; then
+  echo "El mountpoint de $dataset no coincide con NAISKOS_STORAGE_ROOT." >&2
+  exit 1
+fi
+
+install -d -m 0755 "$(dirname "$lock_file")"
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "Ya existe otro backup Naiskos en ejecución." >&2
+  exit 0
+fi
+
+dump_tmp="${dump_file}.tmp"
+cleanup() {
+  if mountpoint -q "${source_root}/telegram"; then
+    umount "${source_root}/telegram" || true
+  fi
+  if mountpoint -q "${source_root}/objects"; then
+    umount "${source_root}/objects" || true
+  fi
+  rmdir "${source_root}/telegram" "${source_root}/objects" "$source_root" 2>/dev/null || true
+  rm -f -- "$dump_tmp"
+}
+trap cleanup EXIT
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+snapshot_name="naiskos-auto-${timestamp}"
+snapshot="${dataset}@${snapshot_name}"
+objects_snapshot="${storage_root}/objects/.zfs/snapshot/${snapshot_name}"
+telegram_snapshot="${storage_root}/telegram/.zfs/snapshot/${snapshot_name}"
+
+install -d -m 0700 "$(dirname "$dump_file")"
+rm -f -- "$dump_tmp"
+docker exec "$postgres_container" pg_dump \
+  -U "$postgres_admin" -d "$database_name" -Fc >"$dump_tmp"
+chmod 0600 "$dump_tmp"
+pg_restore --list "$dump_tmp" >/dev/null
+mv "$dump_tmp" "$dump_file"
+
+zfs snapshot -r "$snapshot"
+if [[ ! -d "$objects_snapshot" || ! -d "$telegram_snapshot" ]]; then
+  echo "No se pueden leer las rutas del snapshot ZFS recién creado." >&2
+  exit 1
+fi
+
+install -d -m 0700 "$source_root" "${source_root}/objects" "${source_root}/telegram"
+mount --bind "$objects_snapshot" "${source_root}/objects"
+mount -o remount,bind,ro "${source_root}/objects"
+mount --bind "$telegram_snapshot" "${source_root}/telegram"
+mount -o remount,bind,ro "${source_root}/telegram"
+
+restic cat config >/dev/null
+restic backup \
+  --host "$backup_host" \
+  --tag naiskos \
+  --tag scheduled \
+  --exclude "$RESTIC_PASSWORD_FILE" \
+  "$dump_file" \
+  "$secrets_root" \
+  "${source_root}/objects" \
+  "${source_root}/telegram"
+restic check
+restic forget \
+  --host "$backup_host" \
+  --tag naiskos \
+  --group-by host,tags \
+  --keep-daily "$keep_daily" \
+  --keep-weekly "$keep_weekly" \
+  --keep-monthly "$keep_monthly" \
+  --prune
+
+cutoff_epoch="$(( $(date -u +%s) - zfs_retention_days * 86400 ))"
+while IFS= read -r expired_snapshot; do
+  [[ -n "$expired_snapshot" ]] || continue
+  zfs destroy -r "$expired_snapshot"
+done < <(
+  zfs list -H -p -t snapshot -o name,creation -r "$dataset" |
+    awk -v prefix="${dataset}@naiskos-auto-" -v cutoff="$cutoff_epoch" \
+      'index($1, prefix) == 1 && $2 < cutoff { print $1 }'
+)
+
+echo "Backup Naiskos completado: snapshot ZFS $snapshot y copia Restic verificada."

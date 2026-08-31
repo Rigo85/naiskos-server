@@ -1,0 +1,25 @@
+[Unit]
+Description=Backup verificable de PostgreSQL y medios de Naiskos
+After=network-online.target docker.service zfs-mount.service local-fs.target
+Wants=network-online.target
+OnFailure=naiskos-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/naiskos/backup.env
+ExecStart=/usr/local/sbin/naiskos-backup
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+CPUQuota=100%
+IOWeight=20
+MemoryHigh=1G
+MemoryMax=2G
+TimeoutStartSec=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateMounts=true
+ProtectSystem=full
+ProtectHome=false

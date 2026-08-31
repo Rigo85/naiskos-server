@@ -1,0 +1,12 @@
+[Unit]
+Description=Programar el backup diario de Naiskos
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 America/Lima
+RandomizedDelaySec=10min
+AccuracySec=1min
+Persistent=true
+Unit=naiskos-backup.service
+
+[Install]
+WantedBy=timers.target

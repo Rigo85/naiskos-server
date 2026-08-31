@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+deploy_root="${NAISKOS_DEPLOY_ROOT:-/opt/naiskos-server}"
+backup_mount="${NAISKOS_BACKUP_MOUNT:?Falta NAISKOS_BACKUP_MOUNT}"
+backup_uuid="${NAISKOS_BACKUP_DEVICE_UUID:?Falta NAISKOS_BACKUP_DEVICE_UUID}"
+repository="${RESTIC_REPOSITORY:?Falta RESTIC_REPOSITORY}"
+dataset="${NAISKOS_ZFS_DATASET:?Falta NAISKOS_ZFS_DATASET}"
+storage_root="${NAISKOS_STORAGE_ROOT:?Falta NAISKOS_STORAGE_ROOT}"
+postgres_container="${NAISKOS_POSTGRES_CONTAINER:?Falta NAISKOS_POSTGRES_CONTAINER}"
+server_env_source="${NAISKOS_SERVER_ENV_SOURCE:-${deploy_root}/shared/secrets/server.env}"
+password_file="${RESTIC_PASSWORD_FILE:-${deploy_root}/shared/secrets/restic-password}"
+dump_file="${NAISKOS_DB_DUMP_FILE:-${deploy_root}/shared/backups/current/naiskos.dump}"
+secrets_root="${NAISKOS_SECRETS_ROOT:-${deploy_root}/shared/secrets}"
+cache_dir="${RESTIC_CACHE_DIR:-/var/cache/naiskos/restic}"
+source_root="${NAISKOS_BACKUP_SOURCE_ROOT:-/run/naiskos-backup-source}"
+service_user="${NAISKOS_SERVICE_USER:-$(id -un)}"
+service_group="${NAISKOS_SERVICE_GROUP:-$(id -gn)}"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Ejecuta el instalador como usuario administrativo; usará sudo de forma acotada." >&2
+  exit 1
+fi
+for value in "$backup_mount" "$repository" "$dataset" "$storage_root" "$password_file" "$dump_file" "$secrets_root" "$cache_dir" "$source_root"; do
+  if [[ "$value" == *$'\n'* || "$value" == *' '* ]]; then
+    echo "Las rutas y nombres de backup no pueden contener espacios ni saltos de línea." >&2
+    exit 1
+  fi
+done
+for command_name in openssl restic sudo; do
+  command -v "$command_name" >/dev/null || {
+    echo "Falta el comando requerido: $command_name" >&2
+    exit 1
+  }
+done
+if ! mountpoint -q "$backup_mount"; then
+  echo "El destino no está montado: $backup_mount" >&2
+  exit 1
+fi
+mounted_source="$(findmnt -n -o SOURCE -T "$backup_mount")"
+if [[ "$(lsblk -ndo UUID "$mounted_source" | tr -d '[:space:]')" != "$backup_uuid" ]]; then
+  echo "El UUID del destino montado no coincide." >&2
+  exit 1
+fi
+if [[ ! -r "$server_env_source" ]]; then
+  echo "No se puede leer el entorno del servidor para las alertas." >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "$(dirname "$password_file")" "$(dirname "$dump_file")" "$repository"
+if [[ ! -s "$password_file" ]]; then
+  openssl rand -base64 48 >"$password_file"
+fi
+chmod 0600 "$password_file"
+
+export RESTIC_REPOSITORY="$repository" RESTIC_PASSWORD_FILE="$password_file"
+if [[ ! -f "$repository/config" ]]; then
+  restic init
+else
+  restic cat config >/dev/null
+fi
+
+config_tmp="$(mktemp)"
+trap 'rm -f -- "$config_tmp"' EXIT
+cat >"$config_tmp" <<EOF
+NAISKOS_BACKUP_MOUNT=$backup_mount
+NAISKOS_BACKUP_DEVICE_UUID=$backup_uuid
+NAISKOS_ZFS_DATASET=$dataset
+NAISKOS_STORAGE_ROOT=$storage_root
+NAISKOS_POSTGRES_CONTAINER=$postgres_container
+NAISKOS_DATABASE=${NAISKOS_DATABASE:-naiskos}
+NAISKOS_POSTGRES_ADMIN=${NAISKOS_POSTGRES_ADMIN:-postgres}
+NAISKOS_DATABASE_OWNER=${NAISKOS_DATABASE_OWNER:-naiskos_owner}
+NAISKOS_DB_DUMP_FILE=$dump_file
+NAISKOS_SECRETS_ROOT=$secrets_root
+NAISKOS_BACKUP_HOST=${NAISKOS_BACKUP_HOST:-$(hostname -s)}
+NAISKOS_BACKUP_SOURCE_ROOT=$source_root
+NAISKOS_ZFS_RETENTION_DAYS=${NAISKOS_ZFS_RETENTION_DAYS:-30}
+NAISKOS_RESTIC_KEEP_DAILY=${NAISKOS_RESTIC_KEEP_DAILY:-30}
+NAISKOS_RESTIC_KEEP_WEEKLY=${NAISKOS_RESTIC_KEEP_WEEKLY:-12}
+NAISKOS_RESTIC_KEEP_MONTHLY=${NAISKOS_RESTIC_KEEP_MONTHLY:-12}
+RESTIC_REPOSITORY=$repository
+RESTIC_PASSWORD_FILE=$password_file
+RESTIC_CACHE_DIR=$cache_dir
+EOF
+
+sudo install -d -m 0755 /etc/naiskos /usr/local/lib/naiskos
+sudo install -d -m 0700 "$cache_dir"
+sudo install -m 0600 "$config_tmp" /etc/naiskos/backup.env
+if [[ -e /etc/naiskos/server.env || -L /etc/naiskos/server.env ]]; then
+  if [[ "$(readlink -f /etc/naiskos/server.env)" != "$(readlink -f "$server_env_source")" ]]; then
+    echo "/etc/naiskos/server.env ya existe y apunta a otro archivo; no se modificó." >&2
+    exit 1
+  fi
+else
+  sudo ln -s "$server_env_source" /etc/naiskos/server.env
+fi
+sudo install -m 0755 "${deploy_root}/current/deploy/naiskos-backup" /usr/local/sbin/naiskos-backup
+sudo install -m 0755 "${deploy_root}/current/deploy/naiskos-restore-test" /usr/local/sbin/naiskos-restore-test
+sudo install -m 0755 "${deploy_root}/current/deploy/naiskos-backup-alert.mjs" /usr/local/lib/naiskos/naiskos-backup-alert.mjs
+sudo install -m 0644 "${deploy_root}/current/deploy/naiskos-backup.service" /etc/systemd/system/naiskos-backup.service
+sudo install -m 0644 "${deploy_root}/current/deploy/naiskos-backup.timer" /etc/systemd/system/naiskos-backup.timer
+sudo install -m 0644 "${deploy_root}/current/deploy/naiskos-backup-alert@.service" /etc/systemd/system/naiskos-backup-alert@.service
+sudo systemctl daemon-reload
+
+echo "Backup instalado y repositorio Restic verificado. Ejecuta primero naiskos-backup.service manualmente; el timer aún no fue habilitado."

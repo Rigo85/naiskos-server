@@ -1,0 +1,15 @@
+[Unit]
+Description=Alertar fallo del backup de Naiskos (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/naiskos/server.env
+ExecStart=/usr/local/lib/naiskos/naiskos-backup-alert.mjs %i
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

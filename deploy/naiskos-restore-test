@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+backup_config="${NAISKOS_BACKUP_CONFIG:-/etc/naiskos/backup.env}"
+if [[ -r "$backup_config" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$backup_config"
+  set +a
+fi
+
+if [[ $# -ne 2 ]]; then
+  echo "Uso: $0 /var/tmp/naiskos-restore-IDENTIFICADOR naiskos_restore_IDENTIFICADOR" >&2
+  exit 2
+fi
+
+target_root="$1"
+restore_database="$2"
+postgres_container="${NAISKOS_POSTGRES_CONTAINER:?Falta NAISKOS_POSTGRES_CONTAINER}"
+postgres_admin="${NAISKOS_POSTGRES_ADMIN:-postgres}"
+database_owner="${NAISKOS_DATABASE_OWNER:-naiskos_owner}"
+backup_host="${NAISKOS_BACKUP_HOST:-$(hostname -s)}"
+dump_file="${NAISKOS_DB_DUMP_FILE:?Falta NAISKOS_DB_DUMP_FILE}"
+source_root="${NAISKOS_BACKUP_SOURCE_ROOT:-/run/naiskos-backup-source}"
+secrets_root="${NAISKOS_SECRETS_ROOT:?Falta NAISKOS_SECRETS_ROOT}"
+
+: "${RESTIC_REPOSITORY:?Falta RESTIC_REPOSITORY}"
+: "${RESTIC_PASSWORD_FILE:?Falta RESTIC_PASSWORD_FILE}"
+: "${RESTIC_CACHE_DIR:?Falta RESTIC_CACHE_DIR}"
+export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_CACHE_DIR
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "La prueba de restauración debe ejecutarse como root." >&2
+  exit 1
+fi
+if [[ ! "$target_root" =~ ^/var/tmp/naiskos-restore-[A-Za-z0-9_-]+$ ]]; then
+  echo "El destino debe estar bajo /var/tmp/naiskos-restore-IDENTIFICADOR." >&2
+  exit 1
+fi
+if [[ ! "$restore_database" =~ ^naiskos_restore_[a-z0-9_]+$ ]]; then
+  echo "La base desechable debe comenzar por naiskos_restore_." >&2
+  exit 1
+fi
+if [[ ! "$database_owner" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+  echo "El rol propietario configurado no es válido." >&2
+  exit 1
+fi
+if [[ -e "$target_root" ]]; then
+  echo "El destino ya existe; no se sobrescribirá: $target_root" >&2
+  exit 1
+fi
+if docker exec "$postgres_container" psql -U "$postgres_admin" -d postgres \
+  -Atc "SELECT 1 FROM pg_database WHERE datname='${restore_database}'" | grep -qx 1; then
+  echo "La base desechable ya existe; no se sobrescribirá." >&2
+  exit 1
+fi
+
+restic restore latest --host "$backup_host" --tag naiskos --target "$target_root"
+restored_dump="${target_root}${dump_file}"
+if [[ ! -s "$restored_dump" ]]; then
+  echo "No apareció el dump esperado dentro de la restauración." >&2
+  exit 1
+fi
+pg_restore --list "$restored_dump" >/dev/null
+restored_secrets="${target_root}${secrets_root}"
+if [[ ! -s "${restored_secrets}/server.env" ]]; then
+  echo "No se restauraron los secretos operativos esperados." >&2
+  exit 1
+fi
+if [[ -e "${restored_secrets}/restic-password" ]]; then
+  echo "La contraseña Restic no debió incluirse en su propio repositorio." >&2
+  exit 1
+fi
+
+container_dump="/tmp/${restore_database}.dump"
+docker exec "$postgres_container" createdb \
+  -U "$postgres_admin" -O "$database_owner" "$restore_database"
+docker cp "$restored_dump" "${postgres_container}:${container_dump}" >/dev/null
+cleanup_container_dump() {
+  docker exec "$postgres_container" rm -f -- "$container_dump" >/dev/null 2>&1 || true
+}
+trap cleanup_container_dump EXIT
+docker exec "$postgres_container" pg_restore \
+  -U "$postgres_admin" -d "$restore_database" \
+  --no-owner --role="$database_owner" "$container_dump"
+
+owner_mismatches="$(
+  docker exec "$postgres_container" psql -U "$postgres_admin" -d "$restore_database" \
+    -Atc "SELECT count(*) FROM pg_tables
+           WHERE schemaname='naiskos' AND tableowner <> '${database_owner}'"
+)"
+if [[ "$owner_mismatches" != "0" ]]; then
+  echo "La restauración dejó tablas de Naiskos con un propietario inesperado." >&2
+  exit 1
+fi
+
+docker exec "$postgres_container" psql -U "$postgres_admin" -d "$restore_database" \
+  -Atc "SELECT json_build_object(
+    'frames', (SELECT count(*) FROM naiskos.frames),
+    'media', (SELECT count(*) FROM naiskos.media),
+    'variants', (SELECT count(*) FROM naiskos.media_variants),
+    'notifications', (SELECT count(*) FROM naiskos.frame_notifications)
+  )"
+
+restored_objects="${target_root}${source_root}/objects"
+sample_file="$(find "$restored_objects" -type f -size +0c -print -quit)"
+if [[ -z "$sample_file" ]]; then
+  echo "La restauración no contiene ningún objeto multimedia." >&2
+  exit 1
+fi
+sha256sum "$sample_file"
+echo "Restauración de prueba completada. Conserva temporalmente $target_root y $restore_database para inspección."
