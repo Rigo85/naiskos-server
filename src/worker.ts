@@ -22,6 +22,7 @@ import {
   createRotatedPhotoVariant,
 } from "./image-processing.js";
 import { IngestJobPayload, RotateMediaJobPayload } from "./repository.js";
+import { upsertFrameNotification } from "./notifications.js";
 import { TelegramFileSource } from "./telegram.js";
 import {
   createVideoRenditions,
@@ -47,6 +48,12 @@ interface StoredVariant {
   height: number | null;
   durationSeconds: number | null;
   rotationDegrees: 0 | 90 | 180 | 270;
+}
+
+interface PublishResult {
+  added: number;
+  duplicates: number;
+  pendingCapacity: number;
 }
 
 export interface MediaWorkerTelegram {
@@ -92,6 +99,7 @@ export class MediaWorker {
     if (this.busy) return false;
     this.busy = true;
     try {
+      await this.recoverAbandonedJobs();
       const job = await this.claim();
       if (!job) return false;
       const startedAt = Date.now();
@@ -120,6 +128,29 @@ export class MediaWorker {
       return false;
     } finally {
       this.busy = false;
+    }
+  }
+
+  private async recoverAbandonedJobs(): Promise<void> {
+    const recovered = await this.database.query<{ id: string }>(
+      `UPDATE naiskos.jobs
+          SET status='pending', available_at=now(), locked_at=NULL, locked_by=NULL,
+              last_error=concat_ws('; ', NULLIF(last_error, ''),
+                'Lock abandonado recuperado automáticamente')
+        WHERE status='running' AND locked_at <
+              now() - make_interval(secs => $1)
+        RETURNING id`,
+      [this.config.workerLockTimeoutSeconds],
+    );
+    if (recovered.rowCount) {
+      console.warn(
+        JSON.stringify({
+          event: "media.jobs.recovered",
+          timestamp: new Date().toISOString(),
+          count: recovered.rowCount,
+          jobIds: recovered.rows.map((row) => row.id),
+        }),
+      );
     }
   }
 
@@ -180,19 +211,18 @@ export class MediaWorker {
         job.payload.mimeType,
         job.payload.kind,
       );
-      const variants: StoredVariant[] = [
-        await this.storeVariant(
-          input,
-          "original",
-          originalExtension,
-          job.payload.mimeType ?? mimeFor(originalExtension),
-        ),
-      ];
+      let variants: StoredVariant[];
       if (job.payload.kind === "photo") {
         const display = path.join(temporaryRoot, "display.webp");
         await createPhotoDisplayMaster(input, display);
         const metadata = await sharp(display).metadata();
-        variants.push(
+        variants = [
+          await this.storeVariant(
+            input,
+            "original",
+            originalExtension,
+            job.payload.mimeType ?? mimeFor(originalExtension),
+          ),
           await this.storeVariant(
             display,
             "display",
@@ -201,12 +231,18 @@ export class MediaWorker {
             metadata.width ?? null,
             metadata.height ?? null,
           ),
-        );
+        ];
       } else {
         const display = path.join(temporaryRoot, "display.mp4");
         const poster = path.join(temporaryRoot, "poster.jpg");
         const result = await createVideoRenditions(input, display, poster);
-        variants.push(
+        variants = [
+          await this.storeVariant(
+            input,
+            "original",
+            originalExtension,
+            job.payload.mimeType ?? mimeFor(originalExtension),
+          ),
           await this.storeVariant(
             display,
             "display",
@@ -216,21 +252,32 @@ export class MediaWorker {
             null,
             result.display.durationSeconds,
           ),
-        );
-        variants.push(
+
           await this.storeVariant(poster, "poster", ".jpg", "image/jpeg"),
-        );
+        ];
       }
 
-      await this.publish(job, variants);
-      await this.telegram.sendMessage(
-        job.payload.chatId,
-        "El contenido ya está listo y será sincronizado por el marco.",
-      );
+      const result = await this.publish(job, variants);
+      if (result.pendingCapacity > 0) {
+        const message =
+          "El contenido fue procesado, pero al menos un marco alcanzó el 90 % de almacenamiento. Se conservará pendiente y no se sincronizará hasta liberar espacio.";
+        await this.telegram.sendMessage(job.payload.chatId, message);
+        await this.notifyAdministrators(message, job.payload.chatId);
+      } else if (result.added > 0) {
+        await this.telegram.sendMessage(
+          job.payload.chatId,
+          "El contenido ya está listo y será sincronizado por el marco.",
+        );
+      } else {
+        await this.telegram.sendMessage(
+          job.payload.chatId,
+          "Ese contenido ya estaba disponible en el marco; no se creó una copia.",
+        );
+      }
     } catch (error) {
-      await this.fail(job, error);
-      if (error instanceof RejectedVideoError) {
-        await this.telegram.sendMessage(job.payload.chatId, error.message);
+      const retrying = await this.fail(job, error);
+      if (!retrying) {
+        await this.notifyPermanentIngestFailure(job, error);
       }
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
@@ -280,8 +327,8 @@ export class MediaWorker {
   private async publish(
     job: ClaimedJob & { payload: IngestJobPayload },
     variants: StoredVariant[],
-  ): Promise<void> {
-    await transaction(this.database, async (client) => {
+  ): Promise<PublishResult> {
+    return transaction(this.database, async (client) => {
       const mediaResult = await client.query<{ id: string }>(
         `INSERT INTO naiskos.media
            (kind, status, source_unique_id, sender_telegram_user_id, caption, original_delete_after)
@@ -329,23 +376,64 @@ export class MediaWorker {
             ids.set(variant.purpose, result.rows[0].id as string),
           );
       }
+      const result: PublishResult = { added: 0, duplicates: 0, pendingCapacity: 0 };
       for (const frameId of job.payload.frameIds) {
-        await client.query(
-          `INSERT INTO naiskos.frame_media (frame_id, media_id, variant_id, poster_variant_id, position)
-           VALUES ($1, $2, $3, $4, -extract(epoch FROM now())::bigint)
-           ON CONFLICT (frame_id, media_id) DO UPDATE SET deleted_at = NULL, purge_after = NULL`,
-          [frameId, mediaId, ids.get("display"), ids.get("poster") ?? null],
+        const existing = await client.query<{ deletedAt: Date | null }>(
+          `SELECT deleted_at AS "deletedAt" FROM naiskos.frame_media
+            WHERE frame_id=$1 AND media_id=$2 FOR UPDATE`,
+          [frameId, mediaId],
         );
-        await client.query(
-          "UPDATE naiskos.frames SET manifest_version = manifest_version + 1, updated_at = now() WHERE id = $1",
+        if (existing.rows[0] && existing.rows[0].deletedAt === null) {
+          result.duplicates += 1;
+          continue;
+        }
+        const runtime = await client.query<{ diskUsedPercent: number | null }>(
+          `SELECT disk_used_percent::double precision AS "diskUsedPercent"
+             FROM naiskos.frame_runtime WHERE frame_id=$1`,
           [frameId],
         );
+        const pendingCapacity = Number(runtime.rows[0]?.diskUsedPercent ?? 0) >= 90;
+        await client.query(
+          `INSERT INTO naiskos.frame_media
+             (frame_id, media_id, variant_id, poster_variant_id, position, sync_status)
+           VALUES ($1, $2, $3, $4, -extract(epoch FROM now())::bigint, $5)
+           ON CONFLICT (frame_id, media_id) DO UPDATE SET
+             variant_id=EXCLUDED.variant_id, poster_variant_id=EXCLUDED.poster_variant_id,
+             deleted_at=NULL, purge_after=NULL, sync_status=EXCLUDED.sync_status`,
+          [
+            frameId,
+            mediaId,
+            ids.get("display"),
+            ids.get("poster") ?? null,
+            pendingCapacity ? "pending_capacity" : "active",
+          ],
+        );
+        if (pendingCapacity) {
+          result.pendingCapacity += 1;
+          await upsertFrameNotification(client, {
+            frameId,
+            kind: "storage.media.pending_capacity",
+            severity: "error",
+            title: "Contenido pendiente por falta de espacio",
+            message:
+              "Llegó contenido nuevo, pero este marco supera el 90 % de almacenamiento. Libera espacio para sincronizarlo.",
+            dedupeKey: "storage-capacity",
+            details: { mediaId, jobId: job.id },
+          });
+        } else {
+          result.added += 1;
+          await client.query(
+            "UPDATE naiskos.frames SET manifest_version = manifest_version + 1, updated_at = now() WHERE id = $1",
+            [frameId],
+          );
+        }
         await client.query(
           `INSERT INTO naiskos.audit_log (frame_id, actor_telegram_user_id, action, details)
-           VALUES ($1, $2, 'media.ready', $3)`,
+           VALUES ($1, $2, $3, $4)`,
           [
             frameId,
             job.payload.telegramUserId,
+            pendingCapacity ? "media.pending_capacity" : "media.ready",
             JSON.stringify({ mediaId, jobId: job.id }),
           ],
         );
@@ -354,6 +442,7 @@ export class MediaWorker {
         `UPDATE naiskos.jobs SET status='succeeded', completed_at=now() WHERE id=$1`,
         [job.id],
       );
+      return result;
     });
   }
 
@@ -444,7 +533,19 @@ export class MediaWorker {
       }
       await this.activateRotation(job);
     } catch (error) {
-      await this.fail(job, error);
+      const retrying = await this.fail(job, error);
+      if (!retrying) {
+        await upsertFrameNotification(this.database, {
+          frameId: job.payload.frameId,
+          kind: "media.rotation.failed",
+          severity: "error",
+          title: "No se pudo rotar el contenido",
+          message:
+            "La orientación solicitada no pudo procesarse. El contenido anterior permanece disponible.",
+          dedupeKey: `rotation-failed:${job.id}`,
+          details: { mediaId: job.payload.mediaId, jobId: job.id },
+        });
+      }
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
@@ -552,7 +653,7 @@ export class MediaWorker {
     });
   }
 
-  private async fail(job: ClaimedJob, error: unknown): Promise<void> {
+  private async fail(job: ClaimedJob, error: unknown): Promise<boolean> {
     const message =
       error instanceof Error
         ? error.message.slice(0, 2_000)
@@ -569,6 +670,45 @@ export class MediaWorker {
         message,
       ],
     );
+    return retry;
+  }
+
+  private async notifyPermanentIngestFailure(
+    job: ClaimedJob & { payload: IngestJobPayload },
+    error: unknown,
+  ): Promise<void> {
+    const rejected = error instanceof RejectedVideoError;
+    const detail = error instanceof Error ? error.message : String(error);
+    const message = rejected
+      ? detail
+      : "No se pudo procesar el archivo después de varios intentos. Comprueba que no esté dañado y vuelve a enviarlo.";
+    for (const frameId of job.payload.frameIds) {
+      await upsertFrameNotification(this.database, {
+        frameId,
+        kind: rejected ? "media.rejected" : "media.processing.failed",
+        severity: "error",
+        title: rejected ? "Contenido rechazado" : "Error al procesar contenido",
+        message,
+        dedupeKey: `ingest-failed:${job.id}`,
+        details: { jobId: job.id, kind: job.payload.kind },
+      });
+    }
+    await this.telegram.sendMessage(job.payload.chatId, message);
+    await this.notifyAdministrators(message, job.payload.chatId);
+  }
+
+  private async notifyAdministrators(
+    message: string,
+    senderChatId: string,
+  ): Promise<void> {
+    for (const adminId of this.config.telegramAdminIds) {
+      if (adminId === senderChatId) continue;
+      try {
+        await this.telegram.sendMessage(adminId, `Aviso operativo de Naiskos: ${message}`);
+      } catch (error) {
+        console.error("No se pudo avisar al administrador por Telegram", error);
+      }
+    }
   }
 }
 

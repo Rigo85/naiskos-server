@@ -418,4 +418,43 @@ describe("entrada de Telegram", () => {
     expect(payload?.kind).toBe("photo");
     expect(payload?.originalName).toBe("foto.heic");
   });
+
+  it("rechaza GIF y documentos ajenos al MVP antes de encolarlos", () => {
+    const base = {
+      message_id: 1,
+      chat: { id: 10 },
+    };
+    expect(
+      extractMedia(
+        {
+          ...base,
+          document: {
+            file_id: "gif",
+            file_unique_id: "gif-unique",
+            mime_type: "image/gif",
+            file_name: "animacion.gif",
+          },
+        },
+        "user-1",
+        "Rigo",
+        ["frame-1"],
+      ),
+    ).toBeNull();
+    expect(
+      extractMedia(
+        {
+          ...base,
+          document: {
+            file_id: "pdf",
+            file_unique_id: "pdf-unique",
+            mime_type: "application/pdf",
+            file_name: "archivo.pdf",
+          },
+        },
+        "user-1",
+        "Rigo",
+        ["frame-1"],
+      ),
+    ).toBeNull();
+  });
 });

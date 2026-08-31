@@ -738,15 +738,29 @@ export function extractMedia(
     };
   }
   const document = message.document;
+  const supportedPhotoDocuments = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+  ]);
+  const supportedVideoDocuments = new Set([
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "video/x-matroska",
+  ]);
   if (
-    document?.mime_type?.startsWith("image/") ||
-    document?.mime_type?.startsWith("video/")
+    document?.mime_type &&
+    (supportedPhotoDocuments.has(document.mime_type) ||
+      supportedVideoDocuments.has(document.mime_type))
   ) {
     return {
       chatId: String(message.chat.id),
       telegramFileId: document.file_id,
       telegramFileUniqueId: document.file_unique_id,
-      kind: document.mime_type.startsWith("image/") ? "photo" : "video",
+      kind: supportedPhotoDocuments.has(document.mime_type) ? "photo" : "video",
       mimeType: document.mime_type,
       originalName: document.file_name ?? null,
       sizeBytes: document.file_size ?? null,

@@ -13,6 +13,7 @@ export interface ServerConfig {
   telegramAdminIds: Set<string>;
   deviceBootstrapToken: string | null;
   workerIntervalMs: number;
+  workerLockTimeoutSeconds: number;
   originalRetentionDays: number;
   trashRetentionDays: number;
   trustedProxies: string[];
@@ -71,6 +72,12 @@ export function loadConfig(): ServerConfig {
     ),
     deviceBootstrapToken: process.env.NAISKOS_DEVICE_BOOTSTRAP_TOKEN ?? null,
     workerIntervalMs: integer("NAISKOS_WORKER_INTERVAL_MS", 1_000, 250, 60_000),
+    workerLockTimeoutSeconds: integer(
+      "NAISKOS_WORKER_LOCK_TIMEOUT_SECONDS",
+      15 * 60,
+      30,
+      60 * 60,
+    ),
     originalRetentionDays: integer("NAISKOS_ORIGINAL_RETENTION_DAYS", 7, 1, 90),
     trashRetentionDays: integer("NAISKOS_TRASH_RETENTION_DAYS", 30, 1, 365),
     trustedProxies: (process.env.NAISKOS_TRUSTED_PROXIES ?? "127.0.0.1")

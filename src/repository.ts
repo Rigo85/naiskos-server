@@ -4,6 +4,10 @@ import { PoolClient } from "pg";
 import { Database, oneOrNull, transaction } from "./db.js";
 import { tokenHash } from "./security.js";
 import { AutomaticLocation } from "./geo-location.js";
+import {
+  resolveFrameNotification,
+  upsertFrameNotification,
+} from "./notifications.js";
 
 export interface AuthenticatedFrame {
   id: string;
@@ -97,6 +101,18 @@ export interface FrameWeatherRecord {
     fetchedAt: string;
   } | null;
   lastError: string | null;
+}
+
+export interface FrameNotificationRecord {
+  id: string;
+  kind: string;
+  severity: "info" | "warning" | "error";
+  title: string;
+  message: string;
+  createdAt: Date;
+  updatedAt: Date;
+  readAt: Date | null;
+  resolvedAt: Date | null;
 }
 
 export interface DeviceEnrollmentSummary {
@@ -958,7 +974,8 @@ export class Repository {
          JOIN naiskos.media_variants v ON v.id = fm.variant_id
          LEFT JOIN naiskos.media_variants pv ON pv.id = fm.poster_variant_id
          LEFT JOIN naiskos.telegram_users u ON u.id = m.sender_telegram_user_id
-        WHERE fm.frame_id = $1 AND fm.deleted_at IS NULL AND m.status = 'ready'
+        WHERE fm.frame_id = $1 AND fm.deleted_at IS NULL
+          AND fm.sync_status = 'active' AND m.status = 'ready'
         ORDER BY fm.position ASC, m.created_at DESC`,
       [frameId],
     );
@@ -1276,8 +1293,14 @@ export class Repository {
       lastSyncAt: string | null;
     },
   ): Promise<void> {
-    await this.database.query(
-      `INSERT INTO naiskos.frame_runtime
+    await transaction(this.database, async (client) => {
+      const previous = await client.query<{ diskUsedPercent: number | null }>(
+        `SELECT disk_used_percent::double precision AS "diskUsedPercent"
+           FROM naiskos.frame_runtime WHERE frame_id=$1 FOR UPDATE`,
+        [frameId],
+      );
+      await client.query(
+        `INSERT INTO naiskos.frame_runtime
          (frame_id, installed_version, agent_state, disk_used_percent,
           disk_total_bytes, disk_used_bytes, disk_available_bytes,
           disk_reserved_bytes, frame_data_bytes, media_data_bytes,
@@ -1294,21 +1317,72 @@ export class Repository {
          media_data_bytes=COALESCE(EXCLUDED.media_data_bytes, naiskos.frame_runtime.media_data_bytes),
          last_error=EXCLUDED.last_error,
          last_seen_at=now(), last_sync_at=EXCLUDED.last_sync_at`,
-      [
-        frameId,
-        telemetry.manifestVersion,
-        telemetry.state,
-        telemetry.diskUsedPercent,
-        telemetry.diskTotalBytes ?? null,
-        telemetry.diskUsedBytes ?? null,
-        telemetry.diskAvailableBytes ?? null,
-        telemetry.diskReservedBytes ?? null,
-        telemetry.frameDataBytes ?? null,
-        telemetry.mediaDataBytes ?? null,
-        telemetry.lastError,
-        telemetry.lastSyncAt,
-      ],
+        [
+          frameId,
+          telemetry.manifestVersion,
+          telemetry.state,
+          telemetry.diskUsedPercent,
+          telemetry.diskTotalBytes ?? null,
+          telemetry.diskUsedBytes ?? null,
+          telemetry.diskAvailableBytes ?? null,
+          telemetry.diskReservedBytes ?? null,
+          telemetry.frameDataBytes ?? null,
+          telemetry.mediaDataBytes ?? null,
+          telemetry.lastError,
+          telemetry.lastSyncAt,
+        ],
+      );
+
+      const wasBlocked = Number(previous.rows[0]?.diskUsedPercent ?? 0) >= 90;
+      const isBlocked = telemetry.diskUsedPercent >= 90;
+      if (isBlocked && !wasBlocked) {
+        await upsertFrameNotification(client, {
+          frameId,
+          kind: "storage.capacity.blocked",
+          severity: "error",
+          title: "Almacenamiento casi lleno",
+          message:
+            "Naiskos alcanzó el 90 % de uso. No descargará contenido nuevo hasta liberar espacio.",
+          dedupeKey: "storage-capacity",
+          details: { diskUsedPercent: telemetry.diskUsedPercent },
+        });
+        await this.audit(client, "storage.capacity.blocked", frameId, null, {
+          diskUsedPercent: telemetry.diskUsedPercent,
+        });
+      } else if (!isBlocked && wasBlocked) {
+        await resolveFrameNotification(client, frameId, "storage-capacity");
+        const released = await client.query(
+          `UPDATE naiskos.frame_media SET sync_status='active'
+            WHERE frame_id=$1 AND deleted_at IS NULL
+              AND sync_status='pending_capacity'`,
+          [frameId],
+        );
+        if (released.rowCount) {
+          await client.query(
+            `UPDATE naiskos.frames SET manifest_version=manifest_version+1,
+                    updated_at=now() WHERE id=$1`,
+            [frameId],
+          );
+        }
+        await this.audit(client, "storage.capacity.recovered", frameId, null, {
+          diskUsedPercent: telemetry.diskUsedPercent,
+          releasedMedia: released.rowCount ?? 0,
+        });
+      }
+    });
+  }
+
+  async getNotifications(frameId: string): Promise<FrameNotificationRecord[]> {
+    const result = await this.database.query<FrameNotificationRecord>(
+      `SELECT id, kind, severity, title, message,
+              created_at AS "createdAt", updated_at AS "updatedAt",
+              read_at AS "readAt", resolved_at AS "resolvedAt"
+         FROM naiskos.frame_notifications
+        WHERE frame_id=$1 AND dismissed_at IS NULL
+        ORDER BY created_at DESC LIMIT 100`,
+      [frameId],
     );
+    return result.rows;
   }
 
   async applyDeviceEvents(
@@ -1476,6 +1550,34 @@ export class Repository {
               } satisfies RotateMediaJobPayload),
             ],
           );
+        } else if (kind === "notification.read" || kind === "notification.dismissed") {
+          const notificationId = String(event.notificationId ?? "");
+          if (!isUuid(notificationId)) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-notification-id",
+            });
+            continue;
+          }
+          const updated = await client.query(
+            kind === "notification.read"
+              ? `UPDATE naiskos.frame_notifications
+                    SET read_at=COALESCE(read_at, now()), updated_at=now()
+                  WHERE id=$1 AND frame_id=$2`
+              : `UPDATE naiskos.frame_notifications
+                    SET dismissed_at=COALESCE(dismissed_at, now()),
+                        read_at=COALESCE(read_at, now()), updated_at=now()
+                  WHERE id=$1 AND frame_id=$2`,
+            [notificationId, frameId],
+          );
+          if (!updated.rowCount) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "notification-not-found",
+              notificationId,
+            });
+            continue;
+          }
         }
         await this.audit(client, kind, frameId, null, { deviceEventId: id });
       }

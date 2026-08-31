@@ -24,6 +24,12 @@ y de sus medios. El porcentaje usa la misma fórmula que `df`; las columnas son
 opcionales para mantener compatibilidad durante la actualización gradual de
 agentes anteriores.
 
+Las notificaciones operativas se persisten por marco. El servicio deduplica
+incidentes, conserva lectura/ocultación y entrega al agente los últimos 100
+avisos visibles. Cuando el disco reportado llega al 90 %, el contenido nuevo se
+procesa pero queda `pending_capacity`, fuera del manifiesto, hasta que la
+telemetría confirme la recuperación.
+
 ## Requisitos
 
 - Node.js 24 y npm 11.
@@ -94,6 +100,7 @@ agrupan así:
 | Ubicación | ruta GeoLite2, clave de Google y límites de precisión/caché |
 | Clima | URL de Open-Meteo, refresco, caducidad y cooldown |
 | Red externa | timeout y cantidad de reintentos |
+| Worker | timeout para recuperar locks abandonados |
 
 Los valores `CHANGE_ME`, `example.com` y las credenciales vacías del ejemplo
 no son válidos para producción. El token de bootstrap, el token del bot, el
@@ -126,6 +133,10 @@ de Naiskos con esquemas pertenecientes a otros servicios.
 5. El worker procesa el contenido y sólo entonces incrementa el manifiesto.
 6. Cada agente descarga y activa su nueva versión sin interrumpir el medio que
    está mostrando.
+
+Los duplicados no publican otra versión. Los fallos definitivos y el bloqueo de
+capacidad notifican al marco y por Telegram; los trabajos abandonados vuelven a
+estar disponibles después del timeout configurado.
 
 El contrato y las pruebas manuales están en
 [`docs/aprovisionamiento-marcos.md`](docs/aprovisionamiento-marcos.md).

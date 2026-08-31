@@ -240,6 +240,16 @@ export async function buildApp(
     },
   );
 
+  app.get<{ Params: { frameId: string } }>(
+    "/api/v1/frames/:frameId/notifications",
+    async (request, reply) => {
+      const frame = await authenticatedFrame(request, repository);
+      if (!frame || frame.id !== request.params.frameId)
+        return reply.code(401).send({ error: "No autorizado" });
+      return { notifications: await repository.getNotifications(frame.id) };
+    },
+  );
+
   app.post<{
     Params: { frameId: string };
     Body: { wifiAccessPoints?: unknown };

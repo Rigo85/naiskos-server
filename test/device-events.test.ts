@@ -21,7 +21,7 @@ describe("eventos del dispositivo", () => {
       connect: async () => client,
     } as unknown as Pool;
     const repository = new Repository(database);
-    const frameId = "a210a8b6-1a17-4759-af25-2cf1fca0c056";
+    const frameId = "11111111-1111-4111-8111-111111111111";
     const legacyEventId = "dc3c227d-594e-4a88-ad4c-3ef330394127";
     const settingsEventId = "c34a058f-c1fa-4d9d-89ec-d75a28cff37a";
 
@@ -64,7 +64,7 @@ describe("eventos del dispositivo", () => {
   it("elimina sólo la relación del marco y publica un manifiesto nuevo", async () => {
     const client = new FakeClient();
     const repository = new Repository({ connect: async () => client } as unknown as Pool);
-    const frameId = "a210a8b6-1a17-4759-af25-2cf1fca0c056";
+    const frameId = "11111111-1111-4111-8111-111111111111";
     const mediaId = "b210a8b6-1a17-4759-af25-2cf1fca0c057";
     const eventId = "c210a8b6-1a17-4759-af25-2cf1fca0c058";
 
@@ -98,7 +98,7 @@ describe("eventos del dispositivo", () => {
     }
     const client = new RotationClient();
     const repository = new Repository({ connect: async () => client } as unknown as Pool);
-    const frameId = "a210a8b6-1a17-4759-af25-2cf1fca0c056";
+    const frameId = "11111111-1111-4111-8111-111111111111";
     const mediaId = "b210a8b6-1a17-4759-af25-2cf1fca0c057";
     const eventId = "c210a8b6-1a17-4759-af25-2cf1fca0c058";
 
@@ -113,5 +113,34 @@ describe("eventos del dispositivo", () => {
     expect(
       client.statements.some(({ sql }) => sql.includes("manifest_version=manifest_version+1")),
     ).toBe(false);
+  });
+
+  it("persiste lectura y ocultación de notificaciones del mismo marco", async () => {
+    const client = new FakeClient();
+    const repository = new Repository({ connect: async () => client } as unknown as Pool);
+    const frameId = "11111111-1111-4111-8111-111111111111";
+    const notificationId = "b210a8b6-1a17-4759-af25-2cf1fca0c057";
+
+    await repository.applyDeviceEvents(frameId, [
+      {
+        id: "c210a8b6-1a17-4759-af25-2cf1fca0c058",
+        type: "notification.read",
+        notificationId,
+      },
+      {
+        id: "d210a8b6-1a17-4759-af25-2cf1fca0c059",
+        type: "notification.dismissed",
+        notificationId,
+      },
+    ]);
+
+    const notificationUpdates = client.statements.filter(({ sql }) =>
+      sql.includes("UPDATE naiskos.frame_notifications"),
+    );
+    expect(notificationUpdates).toHaveLength(2);
+    expect(notificationUpdates[0]?.sql.match(/read_at=/g)).toHaveLength(1);
+    expect(notificationUpdates[0]?.values).toEqual([notificationId, frameId]);
+    expect(notificationUpdates[1]?.sql).toContain("dismissed_at=COALESCE");
+    expect(notificationUpdates[1]?.sql.match(/read_at=/g)).toHaveLength(1);
   });
 });
