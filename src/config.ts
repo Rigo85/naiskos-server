@@ -30,6 +30,8 @@ export interface ServerConfig {
   externalRequestTimeoutMs: number;
   externalRetryCount: number;
   geoLocationMaxAccuracyRadiusKm: number;
+  telemetryOfflineMinutes: number;
+  telemetryRetentionDays: number;
 }
 
 function integer(
@@ -149,6 +151,18 @@ export function loadConfig(): ServerConfig {
       100,
       1,
       1_000,
+    ),
+    telemetryOfflineMinutes: integer(
+      "NAISKOS_TELEMETRY_OFFLINE_MINUTES",
+      15,
+      5,
+      24 * 60,
+    ),
+    telemetryRetentionDays: integer(
+      "NAISKOS_TELEMETRY_RETENTION_DAYS",
+      30,
+      1,
+      365,
     ),
   };
 }

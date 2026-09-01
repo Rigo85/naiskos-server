@@ -18,17 +18,24 @@ versiones y cola de trabajo. El almacenamiento de objetos permanece fuera de
 las releases. El Telegram Bot API local es opcional: también puede utilizarse
 la API HTTPS oficial configurando `TELEGRAM_API_BASE`.
 
-La telemetría de cada marco conserva capacidad, espacio realmente usado,
-disponible y reservado del filesystem, además del peso total de la data local
-y de sus medios. El porcentaje usa la misma fórmula que `df`; las columnas son
-opcionales para mantener compatibilidad durante la actualización gradual de
-agentes anteriores.
+La telemetría acepta agentes anteriores durante la actualización gradual. El
+contrato nuevo separa heartbeat ligero y muestra completa: conserva último
+contacto, temperatura y firmware, memoria/swap, capacidad y data de Naiskos,
+estado de servicios y sincronización, versiones, pantalla, audio y reloj. El
+último estado queda en `frame_runtime`; las muestras completas se retienen 30
+días por defecto en `frame_telemetry_samples`.
 
 Las notificaciones operativas se persisten por marco. El servicio deduplica
 incidentes, conserva lectura/ocultación y entrega al agente los últimos 100
 avisos visibles. Cuando el disco reportado llega al 90 %, el contenido nuevo se
 procesa pero queda `pending_capacity`, fuera del manifiesto, hasta que la
 telemetría confirme la recuperación.
+
+El monitor central evalúa una vez por minuto los marcos sin contacto y abre un
+incidente a los 15 minutos. Las alertas técnicas se crean y resuelven por
+transición, sin reenviar el mismo incidente en cada muestra, y se notifican a
+los administradores por Telegram. `/marcos`, `/marco <nombre-o-ID>` y
+`/alertas` permiten consultar la flota sin una web administrativa.
 
 ## Requisitos
 
@@ -101,6 +108,7 @@ agrupan así:
 | Clima | URL de Open-Meteo, refresco, caducidad y cooldown |
 | Red externa | timeout y cantidad de reintentos |
 | Worker | timeout para recuperar locks abandonados |
+| Telemetría | minutos para declarar offline y días de retención histórica |
 
 Los valores `CHANGE_ME`, `example.com` y las credenciales vacías del ejemplo
 no son válidos para producción. El token de bootstrap, el token del bot, el

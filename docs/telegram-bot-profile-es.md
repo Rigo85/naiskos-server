@@ -39,6 +39,9 @@ Texto para pegar en **Edit Commands** de BotFather:
 ```text
 start - Iniciar o revisar la autorización
 vincular - Vincularte a un marco mediante su código
+marcos - Ver el estado de los marcos (administradores)
+marco - Consultar un marco por nombre o ID (administradores)
+alertas - Ver alertas activas de la flota (administradores)
 privacy - Consultar la política de privacidad
 ```
 
@@ -46,11 +49,14 @@ No se añade `/settings`: la configuración de presentación pertenece al marco,
 no al perfil del usuario del bot. No se añadirán comandos que sólo dupliquen
 botones contextuales.
 
-Los tres comandos se publicaron en el Bot API el 29 de agosto de 2026.
+Los tres comandos iniciales se publicaron en el Bot API el 29 de agosto de 2026.
 `/start` solicita o revisa la autorización global; `/vincular` acepta el código
 visible en **Marco y equipo**; `/privacy` devuelve la política pública. La
 selección de destinos usa botones contextuales cuando el usuario posee más de
 un marco y no necesita un comando duplicado.
+
+El 31 de agosto se añadieron `/marcos`, `/marco` y `/alertas`, visibles para
+facilitar la operación pero autorizados únicamente para administradores.
 
 ## Privacy Policy
 

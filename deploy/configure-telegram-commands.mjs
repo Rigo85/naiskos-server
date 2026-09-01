@@ -22,6 +22,9 @@ async function call(method, body = {}) {
 const commands = [
   { command: "start", description: "Iniciar o revisar la autorización" },
   { command: "vincular", description: "Vincularte a un marco mediante su código" },
+  { command: "marcos", description: "Ver el estado de los marcos (admin)" },
+  { command: "marco", description: "Consultar un marco por nombre o ID (admin)" },
+  { command: "alertas", description: "Ver alertas activas de la flota (admin)" },
   { command: "privacy", description: "Consultar la política de privacidad" },
 ];
 

@@ -8,6 +8,8 @@ import {
   InvitationResult,
   TelegramApprovalResult,
   TelegramUser,
+  FleetAlert,
+  FleetFrameStatus,
 } from "../src/repository.js";
 import {
   extractMedia,
@@ -129,6 +131,31 @@ class StubRepository implements TelegramRepository {
   async enqueueIngest(): Promise<string> {
     return "job";
   }
+
+  async listFleetStatus(): Promise<FleetFrameStatus[]> {
+    return [{
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "Sala",
+      frameStatus: "active",
+      agentState: "ready",
+      lastSeenAt: new Date(),
+      lastFullTelemetryAt: new Date(),
+      temperatureC: 48.2,
+      diskUsedPercent: 32.5,
+      memoryUsedPercent: 41.7,
+      releaseId: "20260831-test",
+      manifestVersion: 12,
+      activeAlerts: 0,
+    }];
+  }
+
+  async findFleetFrame(): Promise<FleetFrameStatus | null> {
+    return (await this.listFleetStatus())[0] ?? null;
+  }
+
+  async listFleetAlerts(): Promise<FleetAlert[]> {
+    return [];
+  }
 }
 
 class StubTelegram implements TelegramTransport {
@@ -215,6 +242,47 @@ describe("archivos de Telegram", () => {
 });
 
 describe("entrada de Telegram", () => {
+  it("permite consultar flota y alertas sólo al administrador", async () => {
+    const repository = new StubRepository();
+    const telegram = new StubTelegram();
+    const handler = new TelegramHandler(telegramConfig, repository, telegram);
+
+    await handler.handle({
+      update_id: 90,
+      message: {
+        message_id: 90,
+        chat: { id: 99 },
+        from: { id: 99, first_name: "Admin" },
+        text: "/marcos",
+      },
+    });
+    expect(telegram.messages[0]?.text).toContain("Marcos: 1");
+    expect(telegram.messages[0]?.text).toContain("Sala");
+
+    await handler.handle({
+      update_id: 91,
+      message: {
+        message_id: 91,
+        chat: { id: 99 },
+        from: { id: 99, first_name: "Admin" },
+        text: "/marco Sala",
+      },
+    });
+    expect(telegram.messages.at(-1)?.text).toContain("Temperatura: 48.2 °C");
+
+    const denied = new StubTelegram();
+    await new TelegramHandler(telegramConfig, repository, denied).handle({
+      update_id: 92,
+      message: {
+        message_id: 92,
+        chat: { id: 10 },
+        from: { id: 10, first_name: "Persona" },
+        text: "/alertas",
+      },
+    });
+    expect(denied.messages[0]?.text).toContain("reservada");
+  });
+
   it("publica la política de privacidad incluso antes de autorizar al usuario", async () => {
     const repository = new StubRepository();
     const telegram = new StubTelegram();

@@ -4,6 +4,8 @@ import { ServerConfig } from "./config.js";
 import {
   DeviceEnrollmentMutationResult,
   DeviceEnrollmentSummary,
+  FleetAlert,
+  FleetFrameStatus,
   IngestJobPayload,
   InvitationResult,
   TelegramApprovalResult,
@@ -120,6 +122,9 @@ export interface TelegramRepository {
     count?: number;
   }>;
   enqueueIngest(payload: IngestJobPayload): Promise<string>;
+  listFleetStatus(): Promise<FleetFrameStatus[]>;
+  findFleetFrame(query: string): Promise<FleetFrameStatus | null>;
+  listFleetAlerts(): Promise<FleetAlert[]>;
 }
 
 export interface TelegramTransport {
@@ -222,6 +227,30 @@ export class TelegramHandler {
         message.chat.id,
         `Política de privacidad de Naiskos: ${this.config.publicUrl}/privacidad`,
       );
+      return;
+    }
+    const fleetCommand = message.text?.match(/^\/(marcos|alertas|marco)(?:@\w+)?(?:\s+(.*))?$/i);
+    if (fleetCommand) {
+      if (!this.config.telegramAdminIds.has(telegramId)) {
+        await this.telegram.sendMessage(
+          message.chat.id,
+          "La operación de la flota está reservada a los administradores.",
+        );
+        return;
+      }
+      const command = fleetCommand[1]!.toLowerCase();
+      if (command === "marcos") {
+        await this.sendFleetSummary(message.chat.id);
+      } else if (command === "alertas") {
+        await this.sendFleetAlerts(message.chat.id);
+      } else {
+        const query = fleetCommand[2]?.trim();
+        if (!query) {
+          await this.telegram.sendMessage(message.chat.id, "Uso: /marco NOMBRE_O_ID");
+        } else {
+          await this.sendFrameDetail(message.chat.id, query);
+        }
+      }
       return;
     }
     const startPayload = message.text?.startsWith("/start")
@@ -421,6 +450,17 @@ export class TelegramHandler {
       return;
     }
     const [action, targetId] = query.data.split(":", 2);
+    if (action === "fleet-frame" && targetId && this.config.telegramAdminIds.has(actorId)) {
+      const frame = await this.repository.findFleetFrame(targetId);
+      await this.telegram.answerCallbackQuery(query.id, frame ? "Estado actualizado." : "Marco no encontrado.");
+      if (frame) await this.telegram.sendMessage(actorId, formatFrameStatus(frame));
+      return;
+    }
+    if (action === "fleet-alerts" && this.config.telegramAdminIds.has(actorId)) {
+      await this.telegram.answerCallbackQuery(query.id, "Alertas actualizadas.");
+      await this.sendFleetAlerts(actorId);
+      return;
+    }
     if (
       (action === "enroll-approve" || action === "enroll-reject") &&
       targetId &&
@@ -631,6 +671,51 @@ export class TelegramHandler {
     );
   }
 
+  private async sendFleetSummary(chatId: number | string): Promise<void> {
+    const frames = await this.repository.listFleetStatus();
+    if (!frames.length) {
+      await this.telegram.sendMessage(chatId, "No hay marcos activos registrados.");
+      return;
+    }
+    const online = frames.filter((frame) => isOnline(frame.lastSeenAt)).length;
+    const alerts = frames.reduce((total, frame) => total + Number(frame.activeAlerts), 0);
+    const lines = frames.slice(0, 30).map((frame) =>
+      `${isOnline(frame.lastSeenAt) ? "🟢" : "🔴"} ${frame.name} · ${frame.activeAlerts ? `${frame.activeAlerts} alerta(s)` : "sin alertas"}`,
+    );
+    await this.telegram.sendMessage(
+      chatId,
+      `Marcos: ${frames.length} · en línea: ${online} · alertas: ${alerts}\n\n${lines.join("\n")}`,
+      {
+        inline_keyboard: [
+          ...frames.slice(0, 20).map((frame) => [
+            { text: `Ver ${frame.name}`, callback_data: `fleet-frame:${frame.id}` },
+          ]),
+          [{ text: "Ver alertas", callback_data: "fleet-alerts:all" }],
+        ],
+      },
+    );
+  }
+
+  private async sendFrameDetail(chatId: number | string, query: string): Promise<void> {
+    const frame = await this.repository.findFleetFrame(query);
+    await this.telegram.sendMessage(
+      chatId,
+      frame ? formatFrameStatus(frame) : "No encontré un marco con ese nombre o ID.",
+    );
+  }
+
+  private async sendFleetAlerts(chatId: number | string): Promise<void> {
+    const alerts = await this.repository.listFleetAlerts();
+    if (!alerts.length) {
+      await this.telegram.sendMessage(chatId, "✅ No hay alertas activas en la flota.");
+      return;
+    }
+    const lines = alerts.slice(0, 30).map((alert) =>
+      `${alert.severity === "error" ? "🚨" : alert.severity === "warning" ? "⚠️" : "ℹ️"} ${alert.frameName}: ${alert.title}`,
+    );
+    await this.telegram.sendMessage(chatId, `Alertas activas: ${alerts.length}\n\n${lines.join("\n")}`);
+  }
+
   private async replyIfRestricted(
     chatId: number,
     user: TelegramUser,
@@ -651,6 +736,30 @@ export class TelegramHandler {
     }
     return false;
   }
+}
+
+function isOnline(lastSeenAt: Date | null): boolean {
+  return Boolean(lastSeenAt && Date.now() - new Date(lastSeenAt).getTime() < 15 * 60_000);
+}
+
+function formatFrameStatus(frame: FleetFrameStatus): string {
+  const seen = frame.lastSeenAt
+    ? `${Math.max(0, Math.floor((Date.now() - new Date(frame.lastSeenAt).getTime()) / 60_000))} min`
+    : "nunca";
+  const metric = (value: number | null, suffix: string) =>
+    value === null ? "n/d" : `${Number(value).toFixed(1)}${suffix}`;
+  return [
+    `${isOnline(frame.lastSeenAt) ? "🟢" : "🔴"} ${frame.name}`,
+    `ID: ${frame.id}`,
+    `Último contacto: ${seen}`,
+    `Agente: ${frame.agentState ?? "sin datos"}`,
+    `Temperatura: ${metric(frame.temperatureC, " °C")}`,
+    `Disco: ${metric(frame.diskUsedPercent, " %")}`,
+    `Memoria: ${metric(frame.memoryUsedPercent, " %")}`,
+    `Release: ${frame.releaseId ?? "sin datos"}`,
+    `Manifiesto: ${frame.manifestVersion}`,
+    `Alertas activas: ${frame.activeAlerts}`,
+  ].join("\n");
 }
 
 function extractPairingCode(

@@ -14,6 +14,11 @@ import { Repository } from "./repository.js";
 import { verifyOpaqueSecret, verifyWebhookSecret } from "./security.js";
 import { TelegramClient, TelegramHandler, TelegramUpdate } from "./telegram.js";
 import { WeatherService } from "./weather.js";
+import {
+  parseFullTelemetry,
+  parseHeartbeat,
+  parseLegacyTelemetry,
+} from "./telemetry.js";
 
 export async function buildApp(
   config: ServerConfig,
@@ -326,39 +331,65 @@ export async function buildApp(
     };
   });
 
-  app.post<{
-    Params: { frameId: string };
-    Body: {
-      state: string;
-      manifestVersion: number;
-      diskUsedPercent: number;
-      diskTotalBytes?: number;
-      diskUsedBytes?: number;
-      diskAvailableBytes?: number;
-      diskReservedBytes?: number;
-      frameDataBytes?: number;
-      mediaDataBytes?: number;
-      lastError: string | null;
-      lastSyncAt: string | null;
-    };
-  }>("/api/v1/frames/:frameId/telemetry", async (request, reply) => {
+  app.post<{ Params: { frameId: string }; Body: unknown }>(
+    "/api/v1/frames/:frameId/telemetry",
+    async (request, reply) => {
     const frame = await authenticatedFrame(request, repository);
     if (!frame || frame.id !== request.params.frameId)
       return reply.code(401).send({ error: "No autorizado" });
-    const body = request.body;
-    if (
-      !body ||
-      !Number.isSafeInteger(body.manifestVersion) ||
-      !Number.isFinite(body.diskUsedPercent) ||
-      !storageTelemetryIsValid(body)
-    ) {
-      return reply.code(400).send({ error: "Telemetría inválida" });
+    const heartbeat = parseHeartbeat(request.body);
+    if (heartbeat) {
+      await repository.recordHeartbeat(frame.id, heartbeat);
+      return reply.code(204).send();
     }
-    await repository.recordTelemetry(frame.id, body);
+    const full = parseFullTelemetry(request.body, frame.id);
+    if (full) {
+      const transitions = await repository.recordFullTelemetry(frame.id, full);
+      if (transitions.length) {
+        void notifyTelemetryTransitions(
+          telegram,
+          config.telegramAdminIds,
+          transitions,
+          app.log,
+        );
+      }
+      return reply.code(204).send();
+    }
+    const legacy = parseLegacyTelemetry(request.body);
+    if (!legacy) return reply.code(400).send({ error: "Telemetría inválida" });
+    await repository.recordTelemetry(frame.id, legacy);
     return reply.code(204).send();
   });
 
   return app;
+}
+
+export async function notifyTelemetryTransitions(
+  telegram: TelegramClient,
+  adminIds: Set<string>,
+  transitions: Array<{
+    frameName: string;
+    status: "opened" | "resolved";
+    severity: "info" | "warning" | "error";
+    title: string;
+    message: string;
+  }>,
+  logger: { warn(value: object, message: string): void },
+): Promise<void> {
+  const messages = transitions.flatMap((transition) =>
+    [...adminIds].map((adminId) =>
+      telegram.sendMessage(
+        adminId,
+        transition.status === "resolved"
+          ? `✅ Recuperado: ${transition.frameName}\n${transition.title}`
+          : `${transition.severity === "error" ? "🚨" : "⚠️"} ${transition.frameName}\n${transition.title}\n${transition.message}`,
+      ),
+    ),
+  );
+  const results = await Promise.allSettled(messages);
+  if (results.some((result) => result.status === "rejected")) {
+    logger.warn({ failed: results.filter((result) => result.status === "rejected").length }, "No se pudieron entregar todas las alertas por Telegram");
+  }
 }
 
 function storageTelemetryIsValid(body: {

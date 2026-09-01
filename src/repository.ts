@@ -8,6 +8,7 @@ import {
   resolveFrameNotification,
   upsertFrameNotification,
 } from "./notifications.js";
+import { FullTelemetry, HeartbeatTelemetry } from "./telemetry.js";
 
 export interface AuthenticatedFrame {
   id: string;
@@ -132,6 +133,42 @@ export interface DeviceEnrollmentMutationResult {
   status: DeviceEnrollmentSummary["status"] | "missing" | "already_enrolled";
   frameId?: string;
   frameName?: string;
+}
+
+export interface TelemetryAlertTransition {
+  frameId: string;
+  frameName: string;
+  status: "opened" | "resolved";
+  severity: "info" | "warning" | "error";
+  kind: string;
+  title: string;
+  message: string;
+}
+
+export interface FleetFrameStatus {
+  id: string;
+  name: string;
+  frameStatus: string;
+  agentState: string | null;
+  lastSeenAt: Date | null;
+  lastFullTelemetryAt: Date | null;
+  temperatureC: number | null;
+  diskUsedPercent: number | null;
+  memoryUsedPercent: number | null;
+  releaseId: string | null;
+  manifestVersion: number;
+  activeAlerts: number;
+}
+
+export interface FleetAlert {
+  id: string;
+  frameId: string;
+  frameName: string;
+  kind: string;
+  severity: "info" | "warning" | "error";
+  title: string;
+  message: string;
+  createdAt: Date;
 }
 
 export class Repository {
@@ -1380,6 +1417,427 @@ export class Repository {
         });
       }
     });
+  }
+
+  async recordHeartbeat(
+    frameId: string,
+    heartbeat: HeartbeatTelemetry,
+  ): Promise<void> {
+    await this.database.query(
+      `INSERT INTO naiskos.frame_runtime
+         (frame_id, installed_version, agent_state, last_error, last_seen_at,
+          last_sync_at, telemetry_schema_version, last_heartbeat_at,
+          observed_at, uptime_seconds)
+       VALUES ($1,$2,$3,$4,now(),$5,$6,now(),$7,$8)
+       ON CONFLICT (frame_id) DO UPDATE SET
+         installed_version=EXCLUDED.installed_version,
+         agent_state=EXCLUDED.agent_state,
+         last_error=EXCLUDED.last_error,
+         last_seen_at=now(), last_sync_at=EXCLUDED.last_sync_at,
+         telemetry_schema_version=EXCLUDED.telemetry_schema_version,
+         last_heartbeat_at=now(), observed_at=EXCLUDED.observed_at,
+         uptime_seconds=EXCLUDED.uptime_seconds`,
+      [
+        frameId,
+        heartbeat.installedManifestVersion,
+        heartbeat.agentState,
+        heartbeat.lastErrorCode,
+        heartbeat.lastSyncAt,
+        heartbeat.schemaVersion,
+        heartbeat.observedAt,
+        heartbeat.uptimeSeconds,
+      ],
+    );
+  }
+
+  async recordFullTelemetry(
+    frameId: string,
+    telemetry: FullTelemetry,
+  ): Promise<TelemetryAlertTransition[]> {
+    return transaction(this.database, async (client) => {
+      const frameResult = await client.query<{ name: string; diskUsedPercent: number | null }>(
+        `SELECT f.name, r.disk_used_percent::double precision AS "diskUsedPercent"
+           FROM naiskos.frames f
+           LEFT JOIN naiskos.frame_runtime r ON r.frame_id=f.id
+          WHERE f.id=$1 FOR UPDATE OF f`,
+        [frameId],
+      );
+      const frameName = frameResult.rows[0]?.name ?? frameId;
+      const wasStorageBlocked = Number(frameResult.rows[0]?.diskUsedPercent ?? 0) >= 90;
+      const memoryUsedPercent = telemetry.memory.totalBytes > 0
+        ? telemetry.memory.usedBytes / telemetry.memory.totalBytes * 100
+        : 0;
+      await client.query(
+        `INSERT INTO naiskos.frame_runtime
+           (frame_id, installed_version, agent_state, disk_used_percent,
+            disk_total_bytes, disk_used_bytes, disk_available_bytes,
+            frame_data_bytes, media_data_bytes, last_error, last_seen_at,
+            last_sync_at, telemetry_schema_version, last_heartbeat_at,
+            last_full_telemetry_at, observed_at, uptime_seconds,
+            temperature_c, throttled_mask, memory_total_bytes,
+            memory_used_bytes, memory_available_bytes, swap_total_bytes,
+            swap_used_bytes, telemetry)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12,now(),now(),
+                 $13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+         ON CONFLICT (frame_id) DO UPDATE SET
+           installed_version=EXCLUDED.installed_version,
+           agent_state=EXCLUDED.agent_state,
+           disk_used_percent=EXCLUDED.disk_used_percent,
+           disk_total_bytes=EXCLUDED.disk_total_bytes,
+           disk_used_bytes=EXCLUDED.disk_used_bytes,
+           disk_available_bytes=EXCLUDED.disk_available_bytes,
+           frame_data_bytes=EXCLUDED.frame_data_bytes,
+           media_data_bytes=EXCLUDED.media_data_bytes,
+           last_error=EXCLUDED.last_error, last_seen_at=now(),
+           last_sync_at=EXCLUDED.last_sync_at,
+           telemetry_schema_version=EXCLUDED.telemetry_schema_version,
+           last_heartbeat_at=now(), last_full_telemetry_at=now(),
+           observed_at=EXCLUDED.observed_at, uptime_seconds=EXCLUDED.uptime_seconds,
+           temperature_c=EXCLUDED.temperature_c,
+           throttled_mask=EXCLUDED.throttled_mask,
+           memory_total_bytes=EXCLUDED.memory_total_bytes,
+           memory_used_bytes=EXCLUDED.memory_used_bytes,
+           memory_available_bytes=EXCLUDED.memory_available_bytes,
+           swap_total_bytes=EXCLUDED.swap_total_bytes,
+           swap_used_bytes=EXCLUDED.swap_used_bytes,
+           telemetry=EXCLUDED.telemetry`,
+        [
+          frameId,
+          telemetry.sync.installedManifestVersion,
+          telemetry.sync.state === "error" ? "error" : "ready",
+          telemetry.storage.usedPercent,
+          telemetry.storage.totalBytes,
+          telemetry.storage.usedBytes,
+          telemetry.storage.availableBytes,
+          telemetry.storage.frameDataBytes,
+          telemetry.storage.mediaDataBytes,
+          telemetry.sync.lastErrorCode,
+          telemetry.sync.lastSuccessAt,
+          telemetry.schemaVersion,
+          telemetry.observedAt,
+          telemetry.uptimeSeconds,
+          telemetry.thermal.temperatureCelsius,
+          telemetry.thermal.throttledMask,
+          telemetry.memory.totalBytes,
+          telemetry.memory.usedBytes,
+          telemetry.memory.availableBytes,
+          telemetry.memory.swapTotalBytes,
+          telemetry.memory.swapUsedBytes,
+          JSON.stringify(telemetry),
+        ],
+      );
+      await client.query(
+        `INSERT INTO naiskos.frame_telemetry_samples
+           (frame_id, observed_at, temperature_c, throttled_mask,
+            disk_used_percent, memory_used_percent, payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          frameId,
+          telemetry.observedAt,
+          telemetry.thermal.temperatureCelsius,
+          telemetry.thermal.throttledMask,
+          telemetry.storage.usedPercent,
+          memoryUsedPercent,
+          JSON.stringify(telemetry),
+        ],
+      );
+
+      const transitions: TelemetryAlertTransition[] = [];
+      const temperature = telemetry.thermal.temperatureCelsius;
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: temperature !== null && temperature >= 75,
+        recover: temperature === null || temperature < 70,
+        kind: "system.temperature",
+        severity: temperature !== null && temperature >= 80 ? "error" : "warning",
+        title: temperature !== null && temperature >= 80 ? "Temperatura crítica" : "Temperatura elevada",
+        message: temperature === null ? "Temperatura no disponible." : `El marco reporta ${temperature.toFixed(1)} °C.`,
+        dedupeKey: "system-temperature",
+        details: { temperatureCelsius: temperature },
+      }));
+      const mask = telemetry.thermal.throttledMask;
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: mask !== null && mask !== "0x0",
+        recover: mask === "0x0",
+        kind: "system.throttling",
+        severity: "error",
+        title: "Throttling o subtensión detectados",
+        message: `La Raspberry reporta el indicador ${mask ?? "desconocido"}.`,
+        dedupeKey: "system-throttling",
+        details: { throttledMask: mask },
+      }));
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: telemetry.storage.usedPercent >= 80 && telemetry.storage.usedPercent < 90,
+        recover: telemetry.storage.usedPercent < 75 || telemetry.storage.usedPercent >= 90,
+        kind: "storage.capacity.warning",
+        severity: "warning",
+        title: "Almacenamiento alto",
+        message: `El almacenamiento está al ${telemetry.storage.usedPercent.toFixed(1)} %.`,
+        dedupeKey: "storage-warning",
+        details: { diskUsedPercent: telemetry.storage.usedPercent },
+      }));
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: telemetry.storage.usedPercent >= 90,
+        recover: telemetry.storage.usedPercent < 90,
+        kind: "storage.capacity.blocked",
+        severity: "error",
+        title: "Almacenamiento casi lleno",
+        message: "Naiskos alcanzó el 90 % de uso. No descargará contenido nuevo hasta liberar espacio.",
+        dedupeKey: "storage-capacity",
+        details: { diskUsedPercent: telemetry.storage.usedPercent },
+      }));
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: memoryUsedPercent >= 85,
+        recover: memoryUsedPercent < 80,
+        kind: "system.memory",
+        severity: memoryUsedPercent >= 95 ? "error" : "warning",
+        title: memoryUsedPercent >= 95 ? "Memoria crítica" : "Uso alto de memoria",
+        message: `La memoria está al ${memoryUsedPercent.toFixed(1)} %.`,
+        dedupeKey: "system-memory",
+        details: { memoryUsedPercent },
+      }));
+      const swapUsedPercent = telemetry.memory.swapTotalBytes > 0
+        ? telemetry.memory.swapUsedBytes / telemetry.memory.swapTotalBytes * 100
+        : 0;
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: telemetry.memory.swapUsedBytes >= 128 * 1024 * 1024 && swapUsedPercent >= 75,
+        recover: swapUsedPercent < 50,
+        kind: "system.swap",
+        severity: "warning",
+        title: "Uso alto de swap",
+        message: `La swap está al ${swapUsedPercent.toFixed(1)} %.`,
+        dedupeKey: "system-swap",
+        details: { swapUsedPercent, swapUsedBytes: telemetry.memory.swapUsedBytes },
+      }));
+      const lastSuccessAgeMs = telemetry.sync.lastSuccessAt
+        ? Date.now() - Date.parse(telemetry.sync.lastSuccessAt)
+        : Number.POSITIVE_INFINITY;
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: lastSuccessAgeMs > 15 * 60_000,
+        recover: lastSuccessAgeMs <= 10 * 60_000,
+        kind: "sync.stale",
+        severity: "warning",
+        title: "Sincronización atrasada",
+        message: telemetry.sync.lastSuccessAt
+          ? "El marco no completa una sincronización desde hace más de 15 minutos."
+          : "El marco todavía no reporta una sincronización exitosa.",
+        dedupeKey: "sync-stale",
+        details: { lastSuccessAt: telemetry.sync.lastSuccessAt },
+      }));
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: telemetry.sync.pendingOutbox >= 100,
+        recover: telemetry.sync.pendingOutbox < 20,
+        kind: "sync.outbox",
+        severity: "warning",
+        title: "Eventos locales pendientes",
+        message: `El marco conserva ${telemetry.sync.pendingOutbox} eventos sin entregar.`,
+        dedupeKey: "sync-outbox",
+        details: { pendingOutbox: telemetry.sync.pendingOutbox },
+      }));
+      transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+        active: telemetry.sync.desiredManifestVersion !== telemetry.sync.installedManifestVersion,
+        recover: telemetry.sync.desiredManifestVersion === telemetry.sync.installedManifestVersion,
+        kind: "sync.manifest",
+        severity: "warning",
+        title: "Manifiesto pendiente",
+        message: `Asignado ${telemetry.sync.desiredManifestVersion}; instalado ${telemetry.sync.installedManifestVersion}.`,
+        dedupeKey: "sync-manifest",
+        details: {
+          desiredManifestVersion: telemetry.sync.desiredManifestVersion,
+          installedManifestVersion: telemetry.sync.installedManifestVersion,
+        },
+      }));
+      if (wasStorageBlocked && telemetry.storage.usedPercent < 90) {
+        const released = await client.query(
+          `UPDATE naiskos.frame_media SET sync_status='active'
+            WHERE frame_id=$1 AND deleted_at IS NULL
+              AND sync_status='pending_capacity'`,
+          [frameId],
+        );
+        if (released.rowCount) {
+          await client.query(
+            `UPDATE naiskos.frames SET manifest_version=manifest_version+1,
+                    updated_at=now() WHERE id=$1`,
+            [frameId],
+          );
+        }
+      }
+      for (const [key, label, state] of [
+        ["service-chromium", "Chromium", telemetry.services.chromium],
+        ["service-kiosk", "Lanzador del kiosco", telemetry.services.kioskLauncher],
+      ] as const) {
+        transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+          active: state === "inactive" || state === "failed",
+          recover: state === "active",
+          kind: `service.${key.replace("service-", "")}`,
+          severity: "error",
+          title: `${label} no está activo`,
+          message: `${label} reporta estado «${state}».`,
+          dedupeKey: key,
+          details: { state },
+        }));
+      }
+      for (const alert of [
+        {
+          active: !telemetry.display.connected,
+          recover: telemetry.display.connected,
+          kind: "hardware.display",
+          severity: "error" as const,
+          title: "Pantalla no detectada",
+          message: `No se detecta ${telemetry.display.connector}.`,
+          dedupeKey: "hardware-display",
+          details: telemetry.display,
+        },
+        {
+          active: !telemetry.audio.available,
+          recover: telemetry.audio.available,
+          kind: "hardware.audio",
+          severity: "warning" as const,
+          title: "Audio no disponible",
+          message: "El marco no detecta una salida de audio.",
+          dedupeKey: "hardware-audio",
+          details: telemetry.audio,
+        },
+        {
+          active: !telemetry.clock.synchronized,
+          recover: telemetry.clock.synchronized,
+          kind: "system.clock",
+          severity: "warning" as const,
+          title: "Reloj no sincronizado",
+          message: `El reloj del marco no está sincronizado (${telemetry.clock.timezone}).`,
+          dedupeKey: "system-clock",
+          details: telemetry.clock,
+        },
+      ]) transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, alert));
+      return transitions;
+    });
+  }
+
+  async listFleetStatus(): Promise<FleetFrameStatus[]> {
+    const result = await this.database.query<FleetFrameStatus>(
+      `SELECT f.id, f.name, f.status AS "frameStatus",
+              r.agent_state AS "agentState", r.last_seen_at AS "lastSeenAt",
+              r.last_full_telemetry_at AS "lastFullTelemetryAt",
+              r.temperature_c::double precision AS "temperatureC",
+              r.disk_used_percent::double precision AS "diskUsedPercent",
+              CASE WHEN r.memory_total_bytes > 0
+                THEN r.memory_used_bytes::double precision / r.memory_total_bytes * 100
+                ELSE NULL END AS "memoryUsedPercent",
+              r.telemetry->'software'->>'releaseId' AS "releaseId",
+              f.manifest_version::double precision AS "manifestVersion",
+              count(n.id)::integer AS "activeAlerts"
+         FROM naiskos.frames f
+         LEFT JOIN naiskos.frame_runtime r ON r.frame_id=f.id
+         LEFT JOIN naiskos.frame_notifications n ON n.frame_id=f.id
+              AND n.resolved_at IS NULL AND n.dismissed_at IS NULL
+        WHERE f.status <> 'disabled'
+        GROUP BY f.id, r.frame_id
+        ORDER BY f.name`,
+    );
+    return result.rows;
+  }
+
+  async findFleetFrame(query: string): Promise<FleetFrameStatus | null> {
+    const frames = await this.listFleetStatus();
+    const needle = query.trim().toLocaleLowerCase("es");
+    return frames.find((frame) =>
+      frame.id === query || frame.id.startsWith(query) || frame.name.toLocaleLowerCase("es") === needle
+    ) ?? null;
+  }
+
+  async listFleetAlerts(): Promise<FleetAlert[]> {
+    const result = await this.database.query<FleetAlert>(
+      `SELECT n.id, n.frame_id AS "frameId", f.name AS "frameName",
+              n.kind, n.severity, n.title, n.message,
+              n.created_at AS "createdAt"
+         FROM naiskos.frame_notifications n
+         JOIN naiskos.frames f ON f.id=n.frame_id
+        WHERE n.resolved_at IS NULL AND n.dismissed_at IS NULL
+        ORDER BY CASE n.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                 n.created_at DESC
+        LIMIT 100`,
+    );
+    return result.rows;
+  }
+
+  async evaluateOfflineFrames(minutes = 15): Promise<TelemetryAlertTransition[]> {
+    return transaction(this.database, async (client) => {
+      const result = await client.query<{ id: string; name: string; offline: boolean }>(
+        `SELECT f.id, f.name,
+                (r.last_seen_at IS NULL OR r.last_seen_at < now() - make_interval(mins => $1)) AS offline
+           FROM naiskos.frames f
+           LEFT JOIN naiskos.frame_runtime r ON r.frame_id=f.id
+          WHERE f.status='active' AND f.created_at < now() - make_interval(mins => $1)
+          FOR UPDATE OF f`,
+        [minutes],
+      );
+      const transitions: TelemetryAlertTransition[] = [];
+      for (const frame of result.rows) {
+        transitions.push(...await this.transitionTelemetryAlert(client, frame.id, frame.name, {
+          active: frame.offline,
+          recover: !frame.offline,
+          kind: "fleet.offline",
+          severity: "error",
+          title: "Marco sin contacto",
+          message: `El marco no reporta desde hace más de ${minutes} minutos.`,
+          dedupeKey: "fleet-offline",
+          details: { thresholdMinutes: minutes },
+        }));
+      }
+      return transitions;
+    });
+  }
+
+  async pruneTelemetrySamples(retentionDays: number): Promise<number> {
+    const result = await this.database.query(
+      `DELETE FROM naiskos.frame_telemetry_samples
+        WHERE received_at < now() - make_interval(days => $1)`,
+      [retentionDays],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  private async transitionTelemetryAlert(
+    client: PoolClient,
+    frameId: string,
+    frameName: string,
+    alert: {
+      active: boolean;
+      recover: boolean;
+      kind: string;
+      severity: "info" | "warning" | "error";
+      title: string;
+      message: string;
+      dedupeKey: string;
+      details: Record<string, unknown>;
+    },
+  ): Promise<TelemetryAlertTransition[]> {
+    const current = await client.query<{ active: boolean }>(
+      `SELECT resolved_at IS NULL AS active
+         FROM naiskos.frame_notifications
+        WHERE frame_id=$1 AND dedupe_key=$2 FOR UPDATE`,
+      [frameId, alert.dedupeKey],
+    );
+    const wasActive = current.rows[0]?.active ?? false;
+    if (alert.active) {
+      if (!wasActive) {
+        await upsertFrameNotification(client, { frameId, ...alert });
+        await this.audit(client, `${alert.kind}.detected`, frameId, null, alert.details);
+        return [{ frameId, frameName, status: "opened", severity: alert.severity, kind: alert.kind, title: alert.title, message: alert.message }];
+      }
+      await client.query(
+        `UPDATE naiskos.frame_notifications
+            SET severity=$3, title=$4, message=$5, details=$6, updated_at=now()
+          WHERE frame_id=$1 AND dedupe_key=$2 AND resolved_at IS NULL`,
+        [frameId, alert.dedupeKey, alert.severity, alert.title, alert.message, JSON.stringify(alert.details)],
+      );
+      return [];
+    }
+    if (wasActive && alert.recover) {
+      await resolveFrameNotification(client, frameId, alert.dedupeKey);
+      await this.audit(client, `${alert.kind}.recovered`, frameId, null, alert.details);
+      return [{ frameId, frameName, status: "resolved", severity: "info", kind: alert.kind, title: alert.title, message: alert.message }];
+    }
+    return [];
   }
 
   async getNotifications(frameId: string): Promise<FrameNotificationRecord[]> {
