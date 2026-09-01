@@ -1856,9 +1856,11 @@ export class Repository {
   async applyDeviceEvents(
     frameId: string,
     events: Array<Record<string, unknown>>,
+    transitions: TelemetryAlertTransition[] = [],
   ): Promise<string[]> {
     return transaction(this.database, async (client) => {
       const accepted: string[] = [];
+      let frameName: string | null = null;
       for (const event of events.slice(0, 100)) {
         const id = String(event.id ?? "");
         const kind = String(event.type ?? "");
@@ -2046,6 +2048,48 @@ export class Repository {
             });
             continue;
           }
+        } else if (
+          kind === "display.sleep.succeeded" ||
+          kind === "display.sleep.failed" ||
+          kind === "display.wake.succeeded" ||
+          kind === "display.wake.failed"
+        ) {
+          const attempts = Number(event.attempts);
+          if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-attempts",
+            });
+            continue;
+          }
+          if (frameName === null) {
+            const frame = await client.query<{ name: string }>(
+              `SELECT name FROM naiskos.frames WHERE id=$1`,
+              [frameId],
+            );
+            frameName = frame.rows[0]?.name ?? frameId;
+          }
+          const wake = kind.startsWith("display.wake.");
+          const failed = kind.endsWith(".failed");
+          transitions.push(...await this.transitionTelemetryAlert(
+            client,
+            frameId,
+            frameName,
+            {
+              active: failed,
+              recover: !failed,
+              kind: wake ? "schedule.display.wake" : "schedule.display.sleep",
+              severity: wake ? "error" : "warning",
+              title: wake
+                ? "Falló el encendido programado de la pantalla"
+                : "Falló el reposo programado de la pantalla",
+              message: failed
+                ? `El control de pantalla agotó ${attempts} intento${attempts === 1 ? "" : "s"}.`
+                : `El control de pantalla respondió después de ${attempts} intento${attempts === 1 ? "" : "s"}.`,
+              dedupeKey: wake ? "display-wake-failed" : "display-sleep-failed",
+              details: { attempts, deviceEventId: id },
+            },
+          ));
         }
         await this.audit(client, kind, frameId, null, { deviceEventId: id });
       }

@@ -10,7 +10,7 @@ import {
   GoogleWifiLocationProvider,
   normalizeWifiAccessPoints,
 } from "./google-wifi-location.js";
-import { Repository } from "./repository.js";
+import { Repository, TelemetryAlertTransition } from "./repository.js";
 import { verifyOpaqueSecret, verifyWebhookSecret } from "./security.js";
 import { TelegramClient, TelegramHandler, TelegramUpdate } from "./telegram.js";
 import { WeatherService } from "./weather.js";
@@ -323,12 +323,21 @@ export async function buildApp(
       return reply.code(401).send({ error: "No autorizado" });
     if (!Array.isArray(request.body?.events))
       return reply.code(400).send({ error: "events inválido" });
-    return {
-      accepted: await repository.applyDeviceEvents(
-        frame.id,
-        request.body.events,
-      ),
-    };
+    const transitions: TelemetryAlertTransition[] = [];
+    const accepted = await repository.applyDeviceEvents(
+      frame.id,
+      request.body.events,
+      transitions,
+    );
+    if (transitions.length) {
+      void notifyTelemetryTransitions(
+        telegram,
+        config.telegramAdminIds,
+        transitions,
+        app.log,
+      );
+    }
+    return { accepted };
   });
 
   app.post<{ Params: { frameId: string }; Body: unknown }>(
