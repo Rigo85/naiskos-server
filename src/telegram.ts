@@ -10,6 +10,7 @@ import {
   InvitationResult,
   TelegramApprovalResult,
   TelegramUser,
+  ReleaseCampaignSummary,
 } from "./repository.js";
 
 interface TelegramFrom {
@@ -125,6 +126,12 @@ export interface TelegramRepository {
   listFleetStatus(): Promise<FleetFrameStatus[]>;
   findFleetFrame(query: string): Promise<FleetFrameStatus | null>;
   listFleetAlerts(): Promise<FleetAlert[]>;
+  listReleaseCampaigns(): Promise<ReleaseCampaignSummary[]>;
+  transitionReleaseCampaign(
+    campaignId: string,
+    action: "approve" | "pause" | "cancel",
+    actorTelegramId: string,
+  ): Promise<boolean>;
 }
 
 export interface TelegramTransport {
@@ -229,7 +236,7 @@ export class TelegramHandler {
       );
       return;
     }
-    const fleetCommand = message.text?.match(/^\/(marcos|alertas|marco)(?:@\w+)?(?:\s+(.*))?$/i);
+    const fleetCommand = message.text?.match(/^\/(marcos|alertas|marco|versiones)(?:@\w+)?(?:\s+(.*))?$/i);
     if (fleetCommand) {
       if (!this.config.telegramAdminIds.has(telegramId)) {
         await this.telegram.sendMessage(
@@ -243,6 +250,8 @@ export class TelegramHandler {
         await this.sendFleetSummary(message.chat.id);
       } else if (command === "alertas") {
         await this.sendFleetAlerts(message.chat.id);
+      } else if (command === "versiones") {
+        await this.sendReleaseCampaigns(message.chat.id);
       } else {
         const query = fleetCommand[2]?.trim();
         if (!query) {
@@ -450,6 +459,27 @@ export class TelegramHandler {
       return;
     }
     const [action, targetId] = query.data.split(":", 2);
+    if (
+      ["release-approve", "release-pause", "release-cancel"].includes(action ?? "") &&
+      targetId && this.config.telegramAdminIds.has(actorId)
+    ) {
+      const transition = action === "release-approve"
+        ? "approve"
+        : action === "release-pause"
+          ? "pause"
+          : "cancel";
+      const changed = await this.repository.transitionReleaseCampaign(
+        targetId,
+        transition,
+        actorId,
+      );
+      await this.telegram.answerCallbackQuery(
+        query.id,
+        changed ? "Campaña actualizada." : "La campaña ya cambió o la transición no es válida.",
+      );
+      await this.sendReleaseCampaigns(actorId);
+      return;
+    }
     if (action === "fleet-frame" && targetId && this.config.telegramAdminIds.has(actorId)) {
       const frame = await this.repository.findFleetFrame(targetId);
       await this.telegram.answerCallbackQuery(query.id, frame ? "Estado actualizado." : "Marco no encontrado.");
@@ -714,6 +744,37 @@ export class TelegramHandler {
       `${alert.severity === "error" ? "🚨" : alert.severity === "warning" ? "⚠️" : "ℹ️"} ${alert.frameName}: ${alert.title}`,
     );
     await this.telegram.sendMessage(chatId, `Alertas activas: ${alerts.length}\n\n${lines.join("\n")}`);
+  }
+
+  private async sendReleaseCampaigns(chatId: number | string): Promise<void> {
+    const campaigns = await this.repository.listReleaseCampaigns();
+    if (!campaigns.length) {
+      await this.telegram.sendMessage(chatId, "No hay campañas de software.");
+      return;
+    }
+    for (const campaign of campaigns.slice(0, 10)) {
+      const buttons = campaign.status === "draft"
+        ? [[
+            { text: "Aprobar campaña", callback_data: `release-approve:${campaign.id}` },
+            { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+          ]]
+        : campaign.status === "approved"
+          ? [[
+              { text: "Pausar", callback_data: `release-pause:${campaign.id}` },
+              { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+            ]]
+          : campaign.status === "paused"
+            ? [[
+                { text: "Reanudar", callback_data: `release-approve:${campaign.id}` },
+                { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+              ]]
+            : undefined;
+      await this.telegram.sendMessage(
+        chatId,
+        `${campaign.releaseId}\nEstado: ${campaign.status}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
+        buttons ? { inline_keyboard: buttons } : undefined,
+      );
+    }
   }
 
   private async replyIfRestricted(

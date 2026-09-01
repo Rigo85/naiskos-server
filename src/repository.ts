@@ -171,6 +171,32 @@ export interface FleetAlert {
   createdAt: Date;
 }
 
+export interface SoftwareAssignment {
+  campaignId: string;
+  releaseId: string;
+  status: string;
+  timezone: string;
+  maintenanceFrom: string;
+  maintenanceUntil: string;
+  observeMinutes: number;
+  manifest: Record<string, unknown>;
+  manifestPath: string;
+  signaturePath: string;
+  archivePath: string;
+  archiveSizeBytes: number;
+  archiveSha256: string;
+}
+
+export interface ReleaseCampaignSummary {
+  id: string;
+  releaseId: string;
+  status: "draft" | "approved" | "paused" | "cancelled" | "completed";
+  frames: number;
+  installed: number;
+  failed: number;
+  createdAt: Date;
+}
+
 export class Repository {
   constructor(private readonly database: Database) {}
 
@@ -183,6 +209,101 @@ export class Repository {
       [tokenHash(token)],
     );
     return oneOrNull(result.rows);
+  }
+
+  async getDesiredSoftware(frameId: string): Promise<SoftwareAssignment | null> {
+    const result = await this.database.query<SoftwareAssignment>(
+      `SELECT a.campaign_id AS "campaignId", r.release_id AS "releaseId",
+              a.status, c.timezone,
+              to_char(c.maintenance_from, 'HH24:MI') AS "maintenanceFrom",
+              to_char(c.maintenance_until, 'HH24:MI') AS "maintenanceUntil",
+              c.observe_minutes AS "observeMinutes", r.manifest,
+              r.manifest_path AS "manifestPath",
+              r.signature_path AS "signaturePath",
+              r.archive_path AS "archivePath",
+              r.archive_size_bytes AS "archiveSizeBytes",
+              r.archive_sha256 AS "archiveSha256"
+         FROM naiskos.release_assignments a
+         JOIN naiskos.release_campaigns c ON c.id=a.campaign_id
+         JOIN naiskos.software_releases r ON r.release_id=c.release_id
+        WHERE a.frame_id=$1 AND c.status='approved' AND r.status='published'
+          AND a.status IN ('assigned','downloading','verified','awaiting_window')
+          AND CASE a.stage
+                WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3
+              END <= CASE c.active_stage
+                WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3
+              END
+        ORDER BY a.assigned_at DESC LIMIT 1`,
+      [frameId],
+    );
+    return oneOrNull(result.rows);
+  }
+
+  async softwareAssetForFrame(
+    frameId: string,
+    releaseId: string,
+    kind: "manifest" | "signature" | "archive",
+  ): Promise<string | null> {
+    const column = {
+      manifest: "r.manifest_path",
+      signature: "r.signature_path",
+      archive: "r.archive_path",
+    }[kind];
+    const result = await this.database.query<{ assetPath: string }>(
+      `SELECT ${column} AS "assetPath"
+         FROM naiskos.release_assignments a
+         JOIN naiskos.release_campaigns c ON c.id=a.campaign_id
+         JOIN naiskos.software_releases r ON r.release_id=c.release_id
+        WHERE a.frame_id=$1 AND r.release_id=$2
+          AND c.status='approved' AND r.status='published'
+        ORDER BY a.assigned_at DESC LIMIT 1`,
+      [frameId, releaseId],
+    );
+    return result.rows[0]?.assetPath ?? null;
+  }
+
+  async listReleaseCampaigns(): Promise<ReleaseCampaignSummary[]> {
+    const result = await this.database.query<ReleaseCampaignSummary>(
+      `SELECT c.id, c.release_id AS "releaseId", c.status, c.created_at AS "createdAt",
+              count(a.frame_id)::integer AS frames,
+              count(*) FILTER (WHERE a.status='installed')::integer AS installed,
+              count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed
+         FROM naiskos.release_campaigns c
+         LEFT JOIN naiskos.release_assignments a ON a.campaign_id=c.id
+        GROUP BY c.id ORDER BY c.created_at DESC LIMIT 20`,
+    );
+    return result.rows;
+  }
+
+  async transitionReleaseCampaign(
+    campaignId: string,
+    action: "approve" | "pause" | "cancel",
+    actorTelegramId: string,
+  ): Promise<boolean> {
+    return transaction(this.database, async (client) => {
+      const result = await client.query(
+        action === "approve"
+          ? `UPDATE naiskos.release_campaigns SET status='approved',
+                approved_at=COALESCE(approved_at,now()), approved_by=$2
+              WHERE id=$1 AND status IN ('draft','paused')`
+          : action === "pause"
+            ? `UPDATE naiskos.release_campaigns SET status='paused'
+                WHERE id=$1 AND status='approved'`
+            : `UPDATE naiskos.release_campaigns SET status='cancelled'
+                WHERE id=$1 AND status IN ('draft','approved','paused')`,
+        action === "approve" ? [campaignId, actorTelegramId] : [campaignId],
+      );
+      if (!result.rowCount) return false;
+      await client.query(
+        `INSERT INTO naiskos.audit_log (action,details)
+         VALUES ($1,$2)`,
+        [
+          `release.campaign.${action === "approve" ? "approved" : action === "pause" ? "paused" : "cancelled"}`,
+          JSON.stringify({ campaignId, actorTelegramId }),
+        ],
+      );
+      return true;
+    });
   }
 
   async automaticallyEnrollDevice(
@@ -2048,6 +2169,210 @@ export class Repository {
             });
             continue;
           }
+        } else if (kind === "software.release.status") {
+          const campaignId = String(event.campaignId ?? "");
+          const releaseId = String(event.releaseId ?? "");
+          const status = String(event.status ?? "");
+          const allowed = new Set([
+            "downloading", "verified", "awaiting_window", "activating",
+            "observing", "installed", "failed", "rolled_back",
+          ]);
+          if (!isUuid(campaignId) || !allowed.has(status)) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-release-status",
+            });
+            continue;
+          }
+          const updated = await client.query(
+            `UPDATE naiskos.release_assignments a SET
+                status=$4,
+                progress_percent=CASE WHEN $4='installed' THEN 100 ELSE $5 END,
+                last_error=$6,
+                downloaded_at=CASE WHEN $4 IN ('verified','awaiting_window') THEN COALESCE(downloaded_at,now()) ELSE downloaded_at END,
+                activated_at=CASE WHEN $4 IN ('observing','installed') THEN COALESCE(activated_at,now()) ELSE activated_at END,
+                observed_at=CASE WHEN $4='installed' THEN now() ELSE observed_at END,
+                updated_at=now()
+              FROM naiskos.release_campaigns c
+             WHERE a.campaign_id=$1 AND a.frame_id=$2 AND c.id=a.campaign_id
+               AND c.release_id=$3`,
+            [
+              campaignId,
+              frameId,
+              releaseId,
+              status,
+              Number.isFinite(Number(event.progressPercent))
+                ? Number(event.progressPercent)
+                : null,
+              typeof event.error === "string" ? event.error.slice(0, 1_000) : null,
+            ],
+          );
+          if (!updated.rowCount) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "assignment-not-found",
+              campaignId,
+              releaseId,
+            });
+            continue;
+          }
+          if (status === "installed" || status === "rolled_back" || status === "failed") {
+            await upsertFrameNotification(client, {
+              frameId,
+              kind: "software.release",
+              severity: status === "installed" ? "info" : "error",
+              title:
+                status === "installed"
+                  ? "Naiskos fue actualizado"
+                  : status === "rolled_back"
+                    ? "Naiskos revirtió una actualización"
+                    : "Falló una actualización de Naiskos",
+              message:
+                status === "installed"
+                  ? `La versión ${releaseId} quedó instalada y verificada.`
+                  : `${releaseId}: ${typeof event.error === "string" ? event.error : status}`,
+              dedupeKey: `software-release-${releaseId}`,
+              details: { campaignId, releaseId, status },
+            });
+          }
+          if (status === "failed" || status === "rolled_back") {
+            const failure = await client.query<{
+              deployed: number;
+              failed: number;
+              threshold: number;
+            }>(
+              `SELECT count(*) FILTER (
+                        WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                           <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                      )::integer AS deployed,
+                      count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed,
+                      c.failure_threshold_percent::float8 AS threshold
+                 FROM naiskos.release_campaigns c
+                 JOIN naiskos.release_assignments a ON a.campaign_id=c.id
+                WHERE c.id=$1 GROUP BY c.id`,
+              [campaignId],
+            );
+            const summary = failure.rows[0];
+            if (
+              summary && summary.deployed > 0 &&
+              (summary.failed / summary.deployed) * 100 >= summary.threshold
+            ) {
+              await client.query(
+                `UPDATE naiskos.release_campaigns SET status='paused'
+                  WHERE id=$1 AND status='approved'`,
+                [campaignId],
+              );
+              await this.audit(client, "release.campaign.auto-paused", frameId, null, {
+                campaignId,
+                releaseId,
+                failed: summary.failed,
+                deployed: summary.deployed,
+                threshold: summary.threshold,
+              });
+            }
+          } else if (status === "installed") {
+            const campaign = await client.query<{
+              activeStage: "pilot" | "ten-percent" | "remainder";
+              remaining: number;
+              nextStage: "ten-percent" | "remainder" | null;
+            }>(
+              `SELECT c.active_stage AS "activeStage",
+                      count(*) FILTER (
+                        WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                           <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                          AND a.status <> 'installed'
+                      )::integer AS remaining,
+                      CASE min(
+                        CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                      ) FILTER (
+                        WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                           > CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                      ) WHEN 2 THEN 'ten-percent' WHEN 3 THEN 'remainder' ELSE NULL END AS "nextStage"
+                 FROM naiskos.release_campaigns c
+                 JOIN naiskos.release_assignments a ON a.campaign_id=c.id
+                WHERE c.id=$1 AND c.status='approved'
+                GROUP BY c.id`,
+              [campaignId],
+            );
+            const current = campaign.rows[0];
+            if (current && current.remaining === 0) {
+              const next = current.nextStage;
+              if (next) {
+                await client.query(
+                  `UPDATE naiskos.release_campaigns SET active_stage=$2 WHERE id=$1`,
+                  [campaignId, next],
+                );
+                await this.audit(client, "release.campaign.stage-advanced", frameId, null, {
+                  campaignId,
+                  releaseId,
+                  from: current.activeStage,
+                  to: next,
+                });
+              } else {
+                await client.query(
+                  `UPDATE naiskos.release_campaigns
+                      SET status='completed', completed_at=now() WHERE id=$1`,
+                  [campaignId],
+                );
+                await this.audit(client, "release.campaign.completed", frameId, null, {
+                  campaignId,
+                  releaseId,
+                });
+              }
+            }
+          }
+        } else if (kind === "system.updates.checked") {
+          const count = Number(event.count);
+          const rebootRequired = event.rebootRequired === true;
+          const error = typeof event.error === "string" ? event.error : null;
+          if (!Number.isSafeInteger(count) || count < 0 || count > 10_000) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-count",
+            });
+            continue;
+          }
+          if (frameName === null) {
+            const frame = await client.query<{ name: string }>(
+              `SELECT name FROM naiskos.frames WHERE id=$1`,
+              [frameId],
+            );
+            frameName = frame.rows[0]?.name ?? frameId;
+          }
+          transitions.push(...await this.transitionTelemetryAlert(
+            client,
+            frameId,
+            frameName,
+            {
+              active: Boolean(error),
+              recover: !error,
+              kind: "system.update-check",
+              severity: "error",
+              title: "Falló la consulta de actualizaciones del SO",
+              message: error ?? "La consulta diaria volvió a responder.",
+              dedupeKey: "system-update-check-failed",
+              details: { count, rebootRequired, deviceEventId: id },
+            },
+          ));
+          transitions.push(...await this.transitionTelemetryAlert(
+            client,
+            frameId,
+            frameName,
+            {
+              active: !error && (count > 0 || rebootRequired),
+              recover: !error && count === 0 && !rebootRequired,
+              kind: "system.updates-pending",
+              severity: "warning",
+              title: rebootRequired
+                ? "El sistema requiere reinicio"
+                : `${count} actualización${count === 1 ? "" : "es"} del SO pendiente${count === 1 ? "" : "s"}`,
+              message: rebootRequired
+                ? `Hay ${count} paquete${count === 1 ? "" : "s"} pendiente${count === 1 ? "" : "s"} y el sistema solicita reinicio.`
+                : "La consulta es informativa: el marco todavía no las instala automáticamente.",
+              dedupeKey: "system-updates-pending",
+              details: { count, rebootRequired, deviceEventId: id },
+            },
+          ));
         } else if (
           kind === "display.sleep.succeeded" ||
           kind === "display.sleep.failed" ||

@@ -314,6 +314,71 @@ export async function buildApp(
     },
   );
 
+  app.get<{ Params: { frameId: string } }>(
+    "/api/v1/frames/:frameId/software",
+    async (request, reply) => {
+      const frame = await authenticatedFrame(request, repository);
+      if (!frame || frame.id !== request.params.frameId)
+        return reply.code(401).send({ error: "No autorizado" });
+      const assignment = await repository.getDesiredSoftware(frame.id);
+      if (!assignment) return reply.code(204).send();
+      const release = encodeURIComponent(assignment.releaseId);
+      const base = `${config.publicUrl}/api/v1/software/releases/${release}`;
+      return {
+        campaignId: assignment.campaignId,
+        releaseId: assignment.releaseId,
+        status: assignment.status,
+        timezone: assignment.timezone,
+        maintenanceWindow: {
+          from: assignment.maintenanceFrom,
+          until: assignment.maintenanceUntil,
+        },
+        observeMinutes: assignment.observeMinutes,
+        archiveSizeBytes: Number(assignment.archiveSizeBytes),
+        archiveSha256: assignment.archiveSha256,
+        manifestUrl: `${base}/manifest`,
+        signatureUrl: `${base}/signature`,
+        archiveUrl: `${base}/archive`,
+      };
+    },
+  );
+
+  app.get<{
+    Params: { releaseId: string; asset: "manifest" | "signature" | "archive" };
+  }>(
+    "/api/v1/software/releases/:releaseId/:asset",
+    async (request, reply) => {
+      const frame = await authenticatedFrame(request, repository);
+      if (!frame) return reply.code(401).send({ error: "No autorizado" });
+      if (!/^[0-9]{8}[A-Za-z0-9._-]{1,80}$/.test(request.params.releaseId))
+        return reply.code(404).send({ error: "Versión no encontrada" });
+      if (!["manifest", "signature", "archive"].includes(request.params.asset))
+        return reply.code(404).send({ error: "Archivo no encontrado" });
+      const relative = await repository.softwareAssetForFrame(
+        frame.id,
+        request.params.releaseId,
+        request.params.asset,
+      );
+      if (!relative) return reply.code(404).send({ error: "Archivo no encontrado" });
+      const root = path.resolve(config.storageRoot);
+      const file = path.resolve(root, relative);
+      if (!file.startsWith(`${root}${path.sep}`))
+        return reply.code(500).send({ error: "Ruta inválida" });
+      const details = await stat(file);
+      const range = parseRange(request.headers.range, details.size);
+      reply.header("accept-ranges", "bytes");
+      reply.header("content-length", String(range ? range.end - range.start + 1 : details.size));
+      if (range) {
+        reply.code(206);
+        reply.header("content-range", `bytes ${range.start}-${range.end}/${details.size}`);
+      }
+      const type = request.params.asset === "manifest"
+        ? "application/json"
+        : "application/octet-stream";
+      return reply.type(type).send(createReadStream(file, range ?? undefined));
+    },
+  );
+
   app.post<{
     Params: { frameId: string };
     Body: { events?: Array<Record<string, unknown>> };

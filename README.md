@@ -195,6 +195,30 @@ npm run test:full-pipeline
 El ensayo crea identidades y almacenamiento temporales, procesa ambos medios,
 verifica hashes y sincronización y limpia sus datos al finalizar.
 
+## Releases y campañas
+
+La migración `014_software_releases.sql` agrega catálogo, campañas y
+asignaciones por marco. Un artefacto se publica sólo después de verificar su
+firma con la clave pública y comprobar tamaño y SHA-256:
+
+```bash
+npm run release-admin -- publish \
+  --manifest /ruta/release.json \
+  --signature /ruta/release.json.sig \
+  --archive /ruta/naiskos-release-arm64.tar.gz
+
+npm run release-admin -- campaign:create \
+  --release-id 20260901-ejemplo-001 \
+  --frames UUID_DEL_MARCO
+
+npm run release-admin -- campaign:approve --campaign-id UUID_DE_CAMPANA
+```
+
+`NAISKOS_RELEASE_PUBLIC_KEY` apunta a la clave pública; la privada nunca se
+copia al servidor. La aprobación es por campaña y queda auditada. El CLI es la
+ruta operativa inicial; los botones Telegram para aprobar, pausar y cancelar
+siguen pendientes.
+
 ## Despliegue
 
 `deploy/ecosystem.config.cjs` define API, worker y Bot API local para PM2. Sus
