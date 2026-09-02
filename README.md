@@ -215,9 +215,10 @@ npm run release-admin -- campaign:approve --campaign-id UUID_DE_CAMPANA
 ```
 
 `NAISKOS_RELEASE_PUBLIC_KEY` apunta a la clave pública; la privada nunca se
-copia al servidor. La aprobación es por campaña y queda auditada. El CLI es la
-ruta operativa inicial; los botones Telegram para aprobar, pausar y cancelar
-siguen pendientes.
+copia al servidor. La aprobación es por campaña y queda auditada. El CLI sirve
+como recuperación administrativa; `/versiones` permite aprobar, pausar,
+reanudar o cancelar. Después de una acción el bot edita únicamente la tarjeta
+afectada y no vuelve a enviar el historial completo.
 
 ## Despliegue
 
@@ -240,6 +241,12 @@ Flujo recomendado:
    pública ordinaria cuando se usa Bot API local.
 6. Verificar salud, webhook, cola, procesamiento, descarga autenticada y
    rollback.
+
+El artefacto central debe construirse antes de copiarse y validarse sobre
+`dist`, no sólo sobre `src`: para las acciones de campañas se comprueba que el
+JavaScript compilado use `editMessageText` y no conserve el reenvío de la lista
+completa. Así se evita desplegar un `dist` anterior aunque el código fuente y
+las pruebas estén corregidos.
 
 `deploy/create-zfs-storage` exige indicar explícitamente el dataset padre y no
 modifica sus propiedades. Los scripts abortan ante recursos ya existentes;
