@@ -25,6 +25,7 @@ const commands = [
   { command: "marcos", description: "Ver el estado de los marcos (admin)" },
   { command: "marco", description: "Consultar un marco por nombre o ID (admin)" },
   { command: "alertas", description: "Ver alertas activas de la flota (admin)" },
+  { command: "versiones", description: "Gestionar campañas de software (admin)" },
   { command: "privacy", description: "Consultar la política de privacidad" },
 ];
 
