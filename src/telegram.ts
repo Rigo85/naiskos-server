@@ -140,6 +140,12 @@ export interface TelegramTransport {
     text: string,
     replyMarkup?: object,
   ): Promise<unknown>;
+  editMessageText(
+    chatId: number | string,
+    messageId: number,
+    text: string,
+    replyMarkup?: object,
+  ): Promise<unknown>;
   answerCallbackQuery(callbackQueryId: string, text: string): Promise<unknown>;
 }
 
@@ -179,6 +185,20 @@ export class TelegramClient {
   ): Promise<unknown> {
     return this.call("sendMessage", {
       chat_id: chatId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
+
+  editMessageText(
+    chatId: number | string,
+    messageId: number,
+    text: string,
+    replyMarkup?: object,
+  ): Promise<unknown> {
+    return this.call("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
       text,
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
@@ -477,7 +497,26 @@ export class TelegramHandler {
         query.id,
         changed ? "Campaña actualizada." : "La campaña ya cambió o la transición no es válida.",
       );
-      await this.sendReleaseCampaigns(actorId);
+      const campaign = (await this.repository.listReleaseCampaigns()).find(
+        (candidate) => candidate.id === targetId,
+      );
+      if (campaign) {
+        const presentation = releaseCampaignPresentation(campaign);
+        if (query.message) {
+          await this.telegram.editMessageText(
+            query.message.chat.id,
+            query.message.message_id,
+            presentation.text,
+            presentation.replyMarkup,
+          );
+        } else {
+          await this.telegram.sendMessage(
+            actorId,
+            presentation.text,
+            presentation.replyMarkup,
+          );
+        }
+      }
       return;
     }
     if (action === "fleet-frame" && targetId && this.config.telegramAdminIds.has(actorId)) {
@@ -753,26 +792,11 @@ export class TelegramHandler {
       return;
     }
     for (const campaign of campaigns.slice(0, 10)) {
-      const buttons = campaign.status === "draft"
-        ? [[
-            { text: "Aprobar campaña", callback_data: `release-approve:${campaign.id}` },
-            { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-          ]]
-        : campaign.status === "approved"
-          ? [[
-              { text: "Pausar", callback_data: `release-pause:${campaign.id}` },
-              { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-            ]]
-          : campaign.status === "paused"
-            ? [[
-                { text: "Reanudar", callback_data: `release-approve:${campaign.id}` },
-                { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-              ]]
-            : undefined;
+      const presentation = releaseCampaignPresentation(campaign);
       await this.telegram.sendMessage(
         chatId,
-        `${campaign.releaseId}\nEstado: ${campaign.status}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
-        buttons ? { inline_keyboard: buttons } : undefined,
+        presentation.text,
+        presentation.replyMarkup,
       );
     }
   }
@@ -797,6 +821,32 @@ export class TelegramHandler {
     }
     return false;
   }
+}
+
+function releaseCampaignPresentation(campaign: ReleaseCampaignSummary): {
+  text: string;
+  replyMarkup?: object;
+} {
+  const buttons = campaign.status === "draft"
+    ? [[
+        { text: "Aprobar campaña", callback_data: `release-approve:${campaign.id}` },
+        { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+      ]]
+    : campaign.status === "approved"
+      ? [[
+          { text: "Pausar", callback_data: `release-pause:${campaign.id}` },
+          { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+        ]]
+      : campaign.status === "paused"
+        ? [[
+            { text: "Reanudar", callback_data: `release-approve:${campaign.id}` },
+            { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
+          ]]
+        : undefined;
+  return {
+    text: `${campaign.releaseId}\nEstado: ${campaign.status}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
+    ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
+  };
 }
 
 function isOnline(lastSeenAt: Date | null): boolean {

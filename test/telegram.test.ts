@@ -10,6 +10,7 @@ import {
   TelegramUser,
   FleetAlert,
   FleetFrameStatus,
+  ReleaseCampaignSummary,
 } from "../src/repository.js";
 import {
   extractMedia,
@@ -37,6 +38,7 @@ class StubRepository implements TelegramRepository {
     changed: false,
     status: "missing",
   };
+  campaigns: ReleaseCampaignSummary[] = [];
 
   async findDeviceEnrollmentByClaimCode(): Promise<DeviceEnrollmentSummary | null> {
     return this.deviceEnrollment;
@@ -156,11 +158,26 @@ class StubRepository implements TelegramRepository {
   async listFleetAlerts(): Promise<FleetAlert[]> {
     return [];
   }
+
+  async listReleaseCampaigns(): Promise<ReleaseCampaignSummary[]> {
+    return this.campaigns;
+  }
+
+  async transitionReleaseCampaign(
+    campaignId: string,
+    action: "approve" | "pause" | "cancel",
+  ): Promise<boolean> {
+    const campaign = this.campaigns.find((candidate) => candidate.id === campaignId);
+    if (!campaign) return false;
+    campaign.status = action === "approve" ? "approved" : action === "pause" ? "paused" : "cancelled";
+    return true;
+  }
 }
 
 class StubTelegram implements TelegramTransport {
   messages: Array<{ chatId: number | string; text: string; markup?: object }> = [];
   answers: Array<{ id: string; text: string }> = [];
+  edits: Array<{ chatId: number | string; messageId: number; text: string; markup?: object }> = [];
 
   async sendMessage(
     chatId: number | string,
@@ -176,6 +193,20 @@ class StubTelegram implements TelegramTransport {
 
   async answerCallbackQuery(id: string, text: string): Promise<void> {
     this.answers.push({ id, text });
+  }
+
+  async editMessageText(
+    chatId: number | string,
+    messageId: number,
+    text: string,
+    replyMarkup?: object,
+  ): Promise<void> {
+    this.edits.push({
+      chatId,
+      messageId,
+      text,
+      ...(replyMarkup ? { markup: replyMarkup } : {}),
+    });
   }
 }
 
@@ -242,6 +273,51 @@ describe("archivos de Telegram", () => {
 });
 
 describe("entrada de Telegram", () => {
+  it("edita sólo la campaña afectada después de una acción", async () => {
+    const repository = new StubRepository();
+    repository.campaigns = [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        releaseId: "20260901-test-001",
+        status: "draft",
+        frames: 1,
+        installed: 0,
+        failed: 0,
+        createdAt: new Date(),
+      },
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        releaseId: "20260901-old-001",
+        status: "completed",
+        frames: 1,
+        installed: 1,
+        failed: 0,
+        createdAt: new Date(),
+      },
+    ];
+    const telegram = new StubTelegram();
+    const handler = new TelegramHandler(telegramConfig, repository, telegram);
+
+    await handler.handle({
+      update_id: 89,
+      callback_query: {
+        id: "callback-89",
+        from: { id: 99, first_name: "Admin" },
+        data: "release-approve:11111111-1111-4111-8111-111111111111",
+        message: { message_id: 700, chat: { id: 99 } },
+      },
+    });
+
+    expect(telegram.messages).toHaveLength(0);
+    expect(telegram.edits).toHaveLength(1);
+    expect(telegram.edits[0]).toMatchObject({
+      chatId: 99,
+      messageId: 700,
+    });
+    expect(telegram.edits[0]?.text).toContain("Estado: approved");
+    expect(JSON.stringify(telegram.edits[0]?.markup)).toContain("release-pause");
+  });
+
   it("permite consultar flota y alertas sólo al administrador", async () => {
     const repository = new StubRepository();
     const telegram = new StubTelegram();
