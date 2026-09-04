@@ -87,6 +87,7 @@ Comandos:
 | `npm test` | Pruebas unitarias y de integración aislada |
 | `npm run migrate` | Aplicar migraciones con el entorno ya cargado |
 | `npm run admin -- --help` | CLI de administración y aprovisionamiento |
+| `npm run reconcile:telegram-notification-failures` | Auditar falsos fallos por límites de Telegram; `-- --apply` los reconcilia |
 | `npm run prepare:test-photos` | Normalizar un lote fotográfico de prueba |
 | `npm run prepare:test-videos` | Normalizar un lote de videos de prueba |
 | `npm run test:full-pipeline` | Ensayo API–worker–agente con PostgreSQL temporal |
@@ -145,6 +146,13 @@ de Naiskos con esquemas pertenecientes a otros servicios.
 Los duplicados no publican otra versión. Los fallos definitivos y el bloqueo de
 capacidad notifican al marco y por Telegram; los trabajos abandonados vuelven a
 estar disponibles después del timeout configurado.
+
+Los acuses de recepción y los resultados multimedia se guardan como trabajos
+`telegram.notify` independientes. El worker los agrupa por destinatario y tipo,
+de modo que una carga grande no envía un mensaje por archivo. Un fallo de
+Telegram nunca modifica el resultado del procesamiento ni provoca que el
+webhook vuelva a encolar el contenido. Ante un `429`, la entrega permanece
+pendiente y respeta el `retry_after` comunicado por Telegram.
 
 El contrato y las pruebas manuales están en
 [`docs/aprovisionamiento-marcos.md`](docs/aprovisionamiento-marcos.md).

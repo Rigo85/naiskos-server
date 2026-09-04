@@ -19,6 +19,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate": "tsx src/migrate.ts",
     "backfill:thumbnails": "tsx src/thumbnail-backfill-main.ts",
+    "reconcile:telegram-notification-failures": "tsx src/reconcile-telegram-notification-failures-main.ts",
     "prepare:test-photos": "node scripts/prepare-photo-pilot.mjs",
     "prepare:test-videos": "node scripts/prepare-video-pilot.mjs",
     "test:full-pipeline": "node scripts/run-full-pipeline-pilot.mjs"

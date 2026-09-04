@@ -26,6 +26,14 @@ import { IngestJobPayload, RotateMediaJobPayload } from "./repository.js";
 import { upsertFrameNotification } from "./notifications.js";
 import { TelegramFileSource } from "./telegram.js";
 import {
+  claimTelegramMediaNoticeBatch,
+  completeTelegramMediaNoticeBatch,
+  formatTelegramMediaNotice,
+  queueTelegramMediaNotice,
+  retryTelegramMediaNoticeBatch,
+  TelegramMediaNoticeCategory,
+} from "./telegram-media-notifications.js";
+import {
   createVideoRenditions,
   createRotatedVideoRenditions,
   RejectedVideoError,
@@ -101,6 +109,40 @@ export class MediaWorker {
     this.busy = true;
     try {
       await this.recoverAbandonedJobs();
+      const notification = await claimTelegramMediaNoticeBatch(
+        this.database,
+        this.workerId,
+      );
+      if (notification) {
+        try {
+          await this.telegram.sendMessage(
+            notification.chatId,
+            formatTelegramMediaNotice(
+              notification.category,
+              notification.count,
+            ),
+          );
+          await completeTelegramMediaNoticeBatch(this.database, notification);
+        } catch (error) {
+          const retryAfterSeconds = await retryTelegramMediaNoticeBatch(
+            this.database,
+            notification,
+            error,
+          );
+          console.warn(
+            JSON.stringify({
+              event: "telegram.media_notification.retry_scheduled",
+              timestamp: new Date().toISOString(),
+              chatId: notification.chatId,
+              category: notification.category,
+              count: notification.count,
+              retryAfterSeconds,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
+        return true;
+      }
       const job = await this.claim();
       if (!job) return false;
       const startedAt = Date.now();
@@ -188,6 +230,7 @@ export class MediaWorker {
     const temporaryRoot = await mkdtemp(
       path.join(os.tmpdir(), "naiskos-media-"),
     );
+    let result: PublishResult;
     try {
       const input = path.join(temporaryRoot, "input");
       const source = await this.telegram.fileSource(
@@ -278,30 +321,46 @@ export class MediaWorker {
         ];
       }
 
-      const result = await this.publish(job, variants);
-      if (result.pendingCapacity > 0) {
-        const message =
-          "El contenido fue procesado, pero al menos un marco alcanzó el 90 % de almacenamiento. Se conservará pendiente y no se sincronizará hasta liberar espacio.";
-        await this.telegram.sendMessage(job.payload.chatId, message);
-        await this.notifyAdministrators(message, job.payload.chatId);
-      } else if (result.added > 0) {
-        await this.telegram.sendMessage(
-          job.payload.chatId,
-          "El contenido ya está listo y será sincronizado por el marco.",
-        );
-      } else {
-        await this.telegram.sendMessage(
-          job.payload.chatId,
-          "Ese contenido ya estaba disponible en el marco; no se creó una copia.",
-        );
-      }
+      result = await this.publish(job, variants);
     } catch (error) {
       const retrying = await this.fail(job, error);
       if (!retrying) {
         await this.notifyPermanentIngestFailure(job, error);
       }
+      return;
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
+    }
+
+    try {
+      if (result.pendingCapacity > 0) {
+        await this.queueOutcomeNotices(
+          job.payload.chatId,
+          "media.capacity",
+          "admin.media.capacity",
+        );
+      } else if (result.added > 0) {
+        await queueTelegramMediaNotice(
+          this.database,
+          job.payload.chatId,
+          "media.ready",
+        );
+      } else {
+        await queueTelegramMediaNotice(
+          this.database,
+          job.payload.chatId,
+          "media.duplicate",
+        );
+      }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "telegram.media_notification.queue_failed",
+          timestamp: new Date().toISOString(),
+          jobId: job.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
   }
 
@@ -476,7 +535,8 @@ export class MediaWorker {
         );
       }
       await client.query(
-        `UPDATE naiskos.jobs SET status='succeeded', completed_at=now() WHERE id=$1`,
+        `UPDATE naiskos.jobs SET status='succeeded', completed_at=now(),
+                locked_at=NULL, locked_by=NULL, last_error=NULL WHERE id=$1`,
         [job.id],
       );
       return result;
@@ -720,7 +780,7 @@ export class MediaWorker {
       }
       await client.query(
         `UPDATE naiskos.jobs SET status='succeeded', completed_at=now(),
-                locked_at=NULL, locked_by=NULL WHERE id=$1`,
+                locked_at=NULL, locked_by=NULL, last_error=NULL WHERE id=$1`,
         [job.id],
       );
     });
@@ -766,21 +826,30 @@ export class MediaWorker {
         details: { jobId: job.id, kind: job.payload.kind },
       });
     }
-    await this.telegram.sendMessage(job.payload.chatId, message);
-    await this.notifyAdministrators(message, job.payload.chatId);
+    await this.queueOutcomeNotices(
+      job.payload.chatId,
+      rejected ? "media.rejected" : "media.failed",
+      rejected ? "admin.media.rejected" : "admin.media.failed",
+    );
   }
 
-  private async notifyAdministrators(
-    message: string,
+  private async queueOutcomeNotices(
     senderChatId: string,
+    senderCategory: TelegramMediaNoticeCategory,
+    administratorCategory: TelegramMediaNoticeCategory,
   ): Promise<void> {
+    await queueTelegramMediaNotice(
+      this.database,
+      senderChatId,
+      senderCategory,
+    );
     for (const adminId of this.config.telegramAdminIds) {
       if (adminId === senderChatId) continue;
-      try {
-        await this.telegram.sendMessage(adminId, `Aviso operativo de Naiskos: ${message}`);
-      } catch (error) {
-        console.error("No se pudo avisar al administrador por Telegram", error);
-      }
+      await queueTelegramMediaNotice(
+        this.database,
+        adminId,
+        administratorCategory,
+      );
     }
   }
 }

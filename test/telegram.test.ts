@@ -39,6 +39,8 @@ class StubRepository implements TelegramRepository {
     status: "missing",
   };
   campaigns: ReleaseCampaignSummary[] = [];
+  frames: Array<{ id: string; name: string }> = [];
+  enqueued: IngestJobPayload[] = [];
 
   async findDeviceEnrollmentByClaimCode(): Promise<DeviceEnrollmentSummary | null> {
     return this.deviceEnrollment;
@@ -115,7 +117,7 @@ class StubRepository implements TelegramRepository {
   }
 
   async accessibleFrames(): Promise<Array<{ id: string; name: string }>> {
-    return [];
+    return this.frames;
   }
 
   async createPendingSelection(): Promise<string> {
@@ -130,7 +132,8 @@ class StubRepository implements TelegramRepository {
     return { state: "missing" };
   }
 
-  async enqueueIngest(): Promise<string> {
+  async enqueueIngest(payload: IngestJobPayload): Promise<string> {
+    this.enqueued.push(payload);
     return "job";
   }
 
@@ -273,6 +276,35 @@ describe("archivos de Telegram", () => {
 });
 
 describe("entrada de Telegram", () => {
+  it("encola un medio sin depender de un mensaje inmediato de confirmación", async () => {
+    const repository = new StubRepository();
+    repository.user = {
+      id: "user-1",
+      telegramId: "10",
+      status: "approved",
+    };
+    repository.frames = [{ id: "frame-1", name: "Sala" }];
+    const telegram = new StubTelegram();
+    const handler = new TelegramHandler(telegramConfig, repository, telegram);
+
+    await handler.handle({
+      update_id: 88,
+      message: {
+        message_id: 88,
+        chat: { id: 10 },
+        from: { id: 10, first_name: "Rigo" },
+        photo: [{
+          file_id: "photo-file",
+          file_unique_id: "photo-unique",
+          file_size: 123,
+        }],
+      },
+    });
+
+    expect(repository.enqueued).toHaveLength(1);
+    expect(telegram.messages).toHaveLength(0);
+  });
+
   it("edita sólo la campaña afectada después de una acción", async () => {
     const repository = new StubRepository();
     repository.campaigns = [

@@ -9,6 +9,7 @@ import {
   upsertFrameNotification,
 } from "./notifications.js";
 import { FullTelemetry, HeartbeatTelemetry } from "./telemetry.js";
+import { queueTelegramMediaNotice } from "./telegram-media-notifications.js";
 
 export interface AuthenticatedFrame {
   id: string;
@@ -1083,6 +1084,11 @@ export class Repository {
         `INSERT INTO naiskos.jobs (id, kind, payload, status, available_at)
          VALUES ($1, 'telegram.ingest', $2, 'pending', now())`,
         [id, JSON.stringify(payload)],
+      );
+      await queueTelegramMediaNotice(
+        client,
+        payload.chatId,
+        "media.received",
       );
       for (const frameId of payload.frameIds) {
         await this.audit(

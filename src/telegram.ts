@@ -153,6 +153,16 @@ export type TelegramFileSource =
   | { kind: "local"; path: string }
   | { kind: "remote"; response: Response };
 
+export class TelegramApiError extends Error {
+  constructor(
+    message: string,
+    readonly retryAfterSeconds: number | null,
+  ) {
+    super(message);
+    this.name = "TelegramApiError";
+  }
+}
+
 export class TelegramClient {
   constructor(private readonly config: ServerConfig) {}
 
@@ -172,9 +182,16 @@ export class TelegramClient {
       ok: boolean;
       result: T;
       description?: string;
+      parameters?: { retry_after?: number };
     };
     if (!response.ok || !result.ok)
-      throw new Error(result.description ?? `Telegram HTTP ${response.status}`);
+      throw new TelegramApiError(
+        result.description ?? `Telegram HTTP ${response.status}`,
+        Number.isSafeInteger(result.parameters?.retry_after) &&
+          Number(result.parameters?.retry_after) > 0
+          ? Math.min(3600, Number(result.parameters!.retry_after))
+          : null,
+      );
     return result.result;
   }
 
@@ -734,10 +751,6 @@ export class TelegramHandler {
       return;
     }
     await this.repository.enqueueIngest(payload);
-    await this.telegram.sendMessage(
-      message.chat.id,
-      `Recibido para «${frames[0]!.name}». Te avisaré cuando esté listo.`,
-    );
   }
 
   private async sendFleetSummary(chatId: number | string): Promise<void> {

@@ -131,7 +131,22 @@ describe.skipIf(!database || !photoPath || !videoPath)(
 
           expect(await worker.runOnce()).toBe(true);
           expect(await worker.runOnce()).toBe(true);
-          expect(await worker.runOnce()).toBe(false);
+          for (let iteration = 0; iteration < 4; iteration += 1) {
+            await database.query(
+              `UPDATE naiskos.jobs SET available_at=now()
+                WHERE kind='telegram.notify' AND status='pending'
+                  AND payload->>'chatId'=$1`,
+              [telegramId],
+            );
+            const pendingNotices = await database.query<{ count: string }>(
+              `SELECT count(*)::text AS count FROM naiskos.jobs
+                WHERE kind='telegram.notify' AND status='pending'
+                  AND payload->>'chatId'=$1`,
+              [telegramId],
+            );
+            if (Number(pendingNotices.rows[0]?.count ?? 0) === 0) break;
+            expect(await worker.runOnce()).toBe(true);
+          }
 
           const jobs = await database.query<{ status: string }>(
             "SELECT status FROM naiskos.jobs WHERE id=ANY($1::uuid[]) ORDER BY created_at",
@@ -199,7 +214,9 @@ describe.skipIf(!database || !photoPath || !videoPath)(
             frame.frameId,
             "https://naiskos.test",
           );
-          expect(configured.settingsRevision).toBe(1);
+          expect(configured.settingsRevision).toBe(
+            Number(manifest.settingsRevision) + 1,
+          );
           expect(configured.settings).toEqual(productionSettings);
 
           await repository.applyDeviceEvents(frame.frameId, [
@@ -224,7 +241,7 @@ describe.skipIf(!database || !photoPath || !videoPath)(
             frame.frameId,
             "https://naiskos.test",
           );
-          expect(rotated.settingsRevision).toBe(1);
+          expect(rotated.settingsRevision).toBe(configured.settingsRevision);
           expect(rotated.settings).toEqual(productionSettings);
           expect(
             (rotated.media as Array<Record<string, unknown>>).map((item) =>
@@ -285,6 +302,11 @@ describe.skipIf(!database || !photoPath || !videoPath)(
               [jobIds],
             );
           }
+          await database.query(
+            `DELETE FROM naiskos.jobs
+              WHERE kind='telegram.notify' AND payload->>'chatId'=$1`,
+            [telegramId],
+          );
           await database.query(
             "DELETE FROM naiskos.jobs WHERE payload->>'frameId'=$1",
             [frame.frameId],

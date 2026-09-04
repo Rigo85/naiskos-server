@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { ServerConfig } from "../src/config.js";
 import { IngestJobPayload, Repository } from "../src/repository.js";
 import { MediaWorker, MediaWorkerTelegram } from "../src/worker.js";
+import { TelegramApiError } from "../src/telegram.js";
 
 const execFileAsync = promisify(execFile);
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -25,6 +26,7 @@ afterAll(async () => {
 
 class LocalTelegram implements MediaWorkerTelegram {
   readonly messages: Array<{ chatId: number | string; text: string }> = [];
+  failure: Error | null = null;
 
   constructor(private readonly files: Map<string, string>) {}
 
@@ -35,8 +37,33 @@ class LocalTelegram implements MediaWorkerTelegram {
   }
 
   async sendMessage(chatId: number | string, text: string): Promise<void> {
+    if (this.failure) throw this.failure;
     this.messages.push({ chatId, text });
   }
+}
+
+async function deliverPendingMediaNotices(
+  worker: MediaWorker,
+  database: Pool,
+  chatIds: string[],
+): Promise<void> {
+  for (let iteration = 0; iteration < 20; iteration += 1) {
+    await database.query(
+      `UPDATE naiskos.jobs SET available_at=now()
+        WHERE kind='telegram.notify' AND status='pending'
+          AND payload->>'chatId'=ANY($1::text[])`,
+      [chatIds],
+    );
+    const pending = await database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM naiskos.jobs
+        WHERE kind='telegram.notify' AND status='pending'
+          AND payload->>'chatId'=ANY($1::text[])`,
+      [chatIds],
+    );
+    if (Number(pending.rows[0]?.count ?? 0) === 0) return;
+    expect(await worker.runOnce()).toBe(true);
+  }
+  throw new Error("La cola de avisos de prueba no terminó");
 }
 
 describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
@@ -147,7 +174,66 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
         );
         expect(afterDuplicate.version).toBe(versionAfterFirst);
         expect(afterDuplicate.media).toHaveLength(1);
-        expect(telegram.messages.at(-1)?.text).toContain("ya estaba");
+        await deliverPendingMediaNotices(worker, database, [telegramId]);
+        expect(
+          telegram.messages.some(({ text }) => text.includes("ya estaba")),
+        ).toBe(true);
+
+        const limitedJob = await repository.enqueueIngest(
+          payload("photo", `telegram-limited-${randomUUID()}`),
+        );
+        expect(await worker.runOnce()).toBe(true);
+        telegram.failure = new TelegramApiError(
+          "Too Many Requests: retry after 1746",
+          1746,
+        );
+        await database.query(
+          `UPDATE naiskos.jobs SET available_at=now()
+            WHERE kind='telegram.notify' AND status='pending'
+              AND payload->>'chatId'=$1`,
+          [telegramId],
+        );
+        expect(await worker.runOnce()).toBe(true);
+        expect(
+          (
+            await database.query<{
+              status: string;
+              notificationCount: string;
+              retryDelay: number;
+            }>(
+              `SELECT j.status,
+                      (SELECT count(*)::text
+                         FROM naiskos.frame_notifications n
+                        WHERE n.frame_id=$2
+                          AND n.dedupe_key=$3) AS "notificationCount",
+                      (SELECT floor(extract(epoch FROM min(nj.available_at)-now()))::integer
+                         FROM naiskos.jobs nj
+                        WHERE nj.kind='telegram.notify'
+                          AND nj.status='pending'
+                          AND nj.payload->>'chatId'=$4) AS "retryDelay"
+                 FROM naiskos.jobs j WHERE j.id=$1`,
+              [
+                limitedJob,
+                frameId,
+                `ingest-failed:${limitedJob}`,
+                telegramId,
+              ],
+            )
+          ).rows[0],
+        ).toMatchObject({
+          status: "succeeded",
+          notificationCount: "0",
+        });
+        const scheduledRetry = await database.query<{ retryDelay: number }>(
+          `SELECT floor(extract(epoch FROM min(available_at)-now()))::integer AS "retryDelay"
+             FROM naiskos.jobs
+            WHERE kind='telegram.notify' AND status='pending'
+              AND payload->>'chatId'=$1`,
+          [telegramId],
+        );
+        expect(scheduledRetry.rows[0]!.retryDelay).toBeGreaterThanOrEqual(1744);
+        telegram.failure = null;
+        await deliverPendingMediaNotices(worker, database, [telegramId]);
 
         const corruptJob = await repository.enqueueIngest(
           payload("corrupt", `corrupt-${randomUUID()}`),
@@ -164,6 +250,10 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
           attempts: number;
         }>("SELECT status, attempts FROM naiskos.jobs WHERE id=$1", [corruptJob]);
         expect(corruptState.rows[0]).toEqual({ status: "failed", attempts: 5 });
+        await deliverPendingMediaNotices(worker, database, [
+          telegramId,
+          "negative-admin",
+        ]);
         expect(
           telegram.messages.some(({ text }) => text.includes("varios intentos")),
         ).toBe(true);
@@ -178,7 +268,11 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
           [longJob],
         );
         expect(longState.rows[0]).toEqual({ status: "failed", attempts: 1 });
-        expect(telegram.messages.length).toBe(messagesBeforeLongVideo + 2);
+        await deliverPendingMediaNotices(worker, database, [
+          telegramId,
+          "negative-admin",
+        ]);
+        expect(telegram.messages.length).toBe(messagesBeforeLongVideo + 3);
         expect(
           (
             await database.query<{ kind: string }>(
@@ -234,8 +328,18 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
           [frameId],
         );
         expect(pending.rows[0]?.syncStatus).toBe("pending_capacity");
-        expect(telegram.messages.at(-2)?.text).toContain("90 %");
-        expect(telegram.messages.at(-1)).toMatchObject({ chatId: "negative-admin" });
+        await deliverPendingMediaNotices(worker, database, [
+          telegramId,
+          "negative-admin",
+        ]);
+        expect(
+          telegram.messages.some(({ text }) => text.includes("90 %")),
+        ).toBe(true);
+        expect(
+          telegram.messages.some(({ chatId, text }) =>
+            chatId === "negative-admin" && text.includes("capacidad"),
+          ),
+        ).toBe(true);
 
         await repository.recordTelemetry(frameId, {
           state: "ready",
@@ -261,7 +365,7 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
         ).toBeTruthy();
         expect(
           (await repository.getManifest(frameId, "https://naiskos.test")).media,
-        ).toHaveLength(3);
+        ).toHaveLength(4);
         expect(
           (
             await database.query<{ status: string }>(
@@ -298,6 +402,24 @@ describe.skipIf(!database)("casos negativos y capacidad PostgreSQL", () => {
           ).rows[0],
         ).toEqual({ read: true, dismissed: true });
       } finally {
+        await database.query(
+          "DELETE FROM naiskos.audit_log WHERE frame_id=$1 OR actor_telegram_user_id=$2",
+          [frameId, userId],
+        );
+        await database.query("DELETE FROM naiskos.frames WHERE id=$1", [frameId]);
+        await database.query(
+          "DELETE FROM naiskos.media WHERE sender_telegram_user_id=$1",
+          [userId],
+        );
+        await database.query(
+          `DELETE FROM naiskos.jobs
+            WHERE payload->>'telegramUserId'=$1
+               OR payload->>'chatId'=ANY($2::text[])`,
+          [userId, [telegramId, "negative-admin"]],
+        );
+        await database.query("DELETE FROM naiskos.telegram_users WHERE id=$1", [
+          userId,
+        ]);
         await rm(root, { recursive: true, force: true });
       }
     },
