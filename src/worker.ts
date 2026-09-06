@@ -21,6 +21,7 @@ import {
   createMediaThumbnail,
   createPhotoDisplayMaster,
   createRotatedPhotoVariant,
+  PhotoDisplayRecovery,
 } from "./image-processing.js";
 import { IngestJobPayload, RotateMediaJobPayload } from "./repository.js";
 import { upsertFrameNotification } from "./notifications.js";
@@ -231,6 +232,7 @@ export class MediaWorker {
       path.join(os.tmpdir(), "naiskos-media-"),
     );
     let result: PublishResult;
+    let photoRecovery: PhotoDisplayRecovery | null = null;
     try {
       const input = path.join(temporaryRoot, "input");
       const source = await this.telegram.fileSource(
@@ -259,7 +261,19 @@ export class MediaWorker {
       if (job.payload.kind === "photo") {
         const display = path.join(temporaryRoot, "display.webp");
         const thumbnail = path.join(temporaryRoot, "thumbnail.webp");
-        await createPhotoDisplayMaster(input, display);
+        const normalized = await createPhotoDisplayMaster(input, display);
+        photoRecovery = normalized.recovery;
+        if (photoRecovery) {
+          console.warn(
+            JSON.stringify({
+              event: "media.photo.recovered",
+              timestamp: new Date().toISOString(),
+              jobId: job.id,
+              strategy: photoRecovery.strategy,
+              warning: photoRecovery.warning,
+            }),
+          );
+        }
         const thumbnailMetadata = await createMediaThumbnail(display, thumbnail);
         const metadata = await sharp(display).metadata();
         variants = [
@@ -321,7 +335,7 @@ export class MediaWorker {
         ];
       }
 
-      result = await this.publish(job, variants);
+      result = await this.publish(job, variants, photoRecovery);
     } catch (error) {
       const retrying = await this.fail(job, error);
       if (!retrying) {
@@ -407,6 +421,7 @@ export class MediaWorker {
   private async publish(
     job: ClaimedJob & { payload: IngestJobPayload },
     variants: StoredVariant[],
+    photoRecovery: PhotoDisplayRecovery | null,
   ): Promise<PublishResult> {
     return transaction(this.database, async (client) => {
       const mediaResult = await client.query<{ id: string }>(
@@ -530,7 +545,11 @@ export class MediaWorker {
             frameId,
             job.payload.telegramUserId,
             pendingCapacity ? "media.pending_capacity" : "media.ready",
-            JSON.stringify({ mediaId, jobId: job.id }),
+            JSON.stringify({
+              mediaId,
+              jobId: job.id,
+              ...(photoRecovery ? { inputRecovery: photoRecovery } : {}),
+            }),
           ],
         );
       }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -59,6 +59,18 @@ async function convert(width: number, height: number) {
   return sharp(output).metadata();
 }
 
+async function invalidateSequentialJpegScanParameters(file: string) {
+  const contents = await readFile(file);
+  const marker = contents.indexOf(Buffer.from([0xff, 0xda]));
+  if (marker < 0) throw new Error("La prueba no encontró el marcador SOS");
+  const components = contents[marker + 4];
+  if (components === undefined)
+    throw new Error("La prueba no encontró los componentes SOS");
+  const spectralStart = marker + 5 + components * 2;
+  contents[spectralStart] = 1;
+  await writeFile(file, contents);
+}
+
 describe("createPhotoDisplayMaster", () => {
   it("conserva resolución suficiente para cover en una foto horizontal", async () => {
     const metadata = await convert(6_000, 4_000);
@@ -78,6 +90,52 @@ describe("createPhotoDisplayMaster", () => {
     const metadata = await convert(640, 400);
     expect(metadata.width).toBe(640);
     expect(metadata.height).toBe(400);
+  });
+
+  it("recupera una advertencia JPEG decodificable sin aceptar errores reales", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "naiskos-photo-recovery-"));
+    temporaryRoots.push(directory);
+    const input = path.join(directory, "recoverable.jpg");
+    const output = path.join(directory, "output.webp");
+    await sharp({
+      create: {
+        width: 192,
+        height: 108,
+        channels: 3,
+        background: "#335577",
+      },
+    })
+      .jpeg()
+      .toFile(input);
+    await invalidateSequentialJpegScanParameters(input);
+
+    await expect(sharp(input).webp().toBuffer()).rejects.toThrow(
+      "Invalid SOS parameters for sequential JPEG",
+    );
+    const result = await createPhotoDisplayMaster(input, output);
+    const metadata = await sharp(output).metadata();
+
+    expect(result.recovery).toEqual({
+      strategy: "jpeg-warning-tolerant-decode",
+      warning: "VipsJpeg: Invalid SOS parameters for sequential JPEG",
+    });
+    expect(metadata).toMatchObject({ format: "webp", width: 192, height: 108 });
+  });
+
+  it("mantiene la ruta estricta para un JPEG válido", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "naiskos-photo-strict-"));
+    temporaryRoots.push(directory);
+    const input = path.join(directory, "valid.jpg");
+    const output = path.join(directory, "output.webp");
+    await sharp({
+      create: { width: 160, height: 90, channels: 3, background: "#557733" },
+    })
+      .jpeg()
+      .toFile(input);
+
+    const result = await createPhotoDisplayMaster(input, output);
+
+    expect(result.recovery).toBeNull();
   });
 });
 

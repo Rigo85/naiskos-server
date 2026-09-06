@@ -173,6 +173,9 @@ Fotografías:
 - orientación incorporada;
 - maestro WebP de calidad 88;
 - resolución suficiente para alternar `contain` y `cover` en el marco;
+- validación JPEG estricta y segundo intento limitado a advertencias
+  recuperables; errores reales y datos truncados siguen rechazándose, y toda
+  recuperación queda registrada en log estructurado y auditoría;
 - nombre direccionado por SHA-256.
 
 Galería:
