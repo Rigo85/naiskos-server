@@ -37,6 +37,12 @@ transición, sin reenviar el mismo incidente en cada muestra, y se notifican a
 los administradores por Telegram. `/marcos`, `/marco <nombre-o-ID>` y
 `/alertas` permiten consultar la flota sin una web administrativa.
 
+El mismo monitor crea una campaña general del SO el primer domingo de cada mes
+a las 00:30 de `America/Lima`. Las asignaciones avanzan por piloto, 10 % y
+resto después de 60 minutos de salud. `/sistema` muestra las campañas y permite
+pausar, reanudar o cancelar. Los marcos reciben sólo un permiso cerrado para su
+propia asignación; el central nunca envía shell ni credenciales administrativas.
+
 ## Requisitos
 
 - Node.js 24 y npm 11.
@@ -110,6 +116,9 @@ agrupan así:
 | Red externa | timeout y cantidad de reintentos |
 | Worker | timeout para recuperar locks abandonados |
 | Telemetría | minutos para declarar offline y días de retención histórica |
+
+Las migraciones incluyen `015_system_update_campaigns.sql`, que mantiene el
+estado de las campañas del SO separado del catálogo de releases Naiskos.
 
 Los valores `CHANGE_ME`, `example.com` y las credenciales vacías del ejemplo
 no son válidos para producción. El token de bootstrap, el token del bot, el
@@ -255,6 +264,10 @@ El artefacto central debe construirse antes de copiarse y validarse sobre
 JavaScript compilado use `editMessageText` y no conserve el reenvío de la lista
 completa. Así se evita desplegar un `dist` anterior aunque el código fuente y
 las pruebas estén corregidos.
+
+Fastify está fijado exactamente en `5.12.3`. El 5 de septiembre de 2026 se
+actualizó desde 5.11.3 junto con sus dependencias transitivas corregidas;
+`npm audit --omit=dev`, typecheck y las pruebas PostgreSQL 16 quedaron limpios.
 
 `deploy/create-zfs-storage` exige indicar explícitamente el dataset padre y no
 modifica sus propiedades. Los scripts abortan ante recursos ya existentes;
