@@ -17,6 +17,23 @@ async function monitorFleet(): Promise<void> {
   if (monitorRunning) return;
   monitorRunning = true;
   try {
+    const monthlyCampaign = await fleetRepository.ensureMonthlySystemUpdateCampaign();
+    if (monthlyCampaign) {
+      await Promise.allSettled([...config.telegramAdminIds].map((adminId) =>
+        telegram.sendMessage(
+          adminId,
+          `🛠 Campaña mensual del SO creada automáticamente.\nID: ${monthlyCampaign}\nEtapa activa: piloto.`,
+        ),
+      ));
+    }
+    const systemCampaignChanges = await fleetRepository.advanceSystemUpdateCampaigns();
+    if (systemCampaignChanges.length) {
+      await Promise.allSettled([...config.telegramAdminIds].flatMap((adminId) =>
+        systemCampaignChanges.map((change) =>
+          telegram.sendMessage(adminId, `🛠 Campaña del SO: ${change}`),
+        ),
+      ));
+    }
     const transitions = await fleetRepository.evaluateOfflineFrames(
       config.telemetryOfflineMinutes,
     );

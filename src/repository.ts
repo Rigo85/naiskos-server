@@ -198,6 +198,26 @@ export interface ReleaseCampaignSummary {
   createdAt: Date;
 }
 
+export interface SystemUpdatePermit {
+  campaignId: string;
+  kind: "general";
+  period: string;
+  timezone: string;
+  maintenanceFrom: string;
+  maintenanceUntil: string;
+}
+
+export interface SystemUpdateCampaignSummary {
+  id: string;
+  period: string;
+  status: "approved" | "paused" | "cancelled" | "completed";
+  activeStage: "pilot" | "ten-percent" | "remainder";
+  frames: number;
+  installed: number;
+  failed: number;
+  scheduledAt: Date;
+}
+
 export class Repository {
   constructor(private readonly database: Database) {}
 
@@ -304,6 +324,214 @@ export class Repository {
         ],
       );
       return true;
+    });
+  }
+
+  async ensureMonthlySystemUpdateCampaign(now = new Date()): Promise<string | null> {
+    const schedule = monthlyGeneralSchedule(now);
+    if (now < schedule.scheduledAt) return null;
+    return transaction(this.database, async (client) => {
+      const frames = await client.query<{ id: string }>(
+        "SELECT id FROM naiskos.frames WHERE status='active' ORDER BY id",
+      );
+      if (!frames.rowCount) return null;
+      const campaignId = randomUUID();
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO naiskos.system_update_campaigns
+           (id,kind,period,status,scheduled_at)
+         VALUES ($1,'general',$2,'approved',$3)
+         ON CONFLICT (kind,period) DO NOTHING RETURNING id`,
+        [campaignId, schedule.period, schedule.scheduledAt],
+      );
+      if (!inserted.rowCount) return null;
+      const uniqueFrames = frames.rows.map((frame) => frame.id);
+      const pilotLimit = Math.max(1, Math.ceil(uniqueFrames.length * 0.01));
+      const tenPercentLimit = Math.max(pilotLimit, Math.ceil(uniqueFrames.length * 0.1));
+      for (const [index, frameId] of uniqueFrames.entries()) {
+        const stage = index < pilotLimit
+          ? "pilot"
+          : index < tenPercentLimit
+            ? "ten-percent"
+            : "remainder";
+        await client.query(
+          `INSERT INTO naiskos.system_update_assignments
+             (campaign_id,frame_id,stage) VALUES ($1,$2,$3)`,
+          [campaignId, frameId, stage],
+        );
+      }
+      await this.audit(client, "system.update.campaign.created", null, null, {
+        campaignId,
+        period: schedule.period,
+        frames: uniqueFrames.length,
+        scheduledAt: schedule.scheduledAt.toISOString(),
+      });
+      return campaignId;
+    });
+  }
+
+  async getSystemUpdatePermit(frameId: string): Promise<SystemUpdatePermit | null> {
+    const result = await this.database.query<SystemUpdatePermit>(
+      `SELECT c.id AS "campaignId", c.kind, c.period, c.timezone,
+              to_char(c.maintenance_from, 'HH24:MI') AS "maintenanceFrom",
+              to_char(c.maintenance_until, 'HH24:MI') AS "maintenanceUntil"
+         FROM naiskos.system_update_assignments a
+         JOIN naiskos.system_update_campaigns c ON c.id=a.campaign_id
+        WHERE a.frame_id=$1 AND c.status='approved' AND c.scheduled_at <= now()
+          AND a.status='assigned'
+          AND CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+              <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+        ORDER BY c.scheduled_at DESC LIMIT 1`,
+      [frameId],
+    );
+    return oneOrNull(result.rows);
+  }
+
+  async listSystemUpdateCampaigns(): Promise<SystemUpdateCampaignSummary[]> {
+    const result = await this.database.query<SystemUpdateCampaignSummary>(
+      `SELECT c.id,c.period,c.status,c.active_stage AS "activeStage",
+              c.scheduled_at AS "scheduledAt",
+              count(a.frame_id)::integer AS frames,
+              count(*) FILTER (WHERE a.status='installed')::integer AS installed,
+              count(*) FILTER (WHERE a.status='failed')::integer AS failed
+         FROM naiskos.system_update_campaigns c
+         LEFT JOIN naiskos.system_update_assignments a ON a.campaign_id=c.id
+        GROUP BY c.id ORDER BY c.scheduled_at DESC LIMIT 12`,
+    );
+    return result.rows;
+  }
+
+  async transitionSystemUpdateCampaign(
+    campaignId: string,
+    action: "resume" | "pause" | "cancel",
+    actorTelegramId: string,
+  ): Promise<boolean> {
+    return transaction(this.database, async (client) => {
+      const result = await client.query(
+        action === "resume"
+          ? "UPDATE naiskos.system_update_campaigns SET status='approved' WHERE id=$1 AND status='paused'"
+          : action === "pause"
+            ? "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1 AND status='approved'"
+            : "UPDATE naiskos.system_update_campaigns SET status='cancelled' WHERE id=$1 AND status IN ('approved','paused')",
+        [campaignId],
+      );
+      if (!result.rowCount) return false;
+      if (action === "resume") {
+        await client.query(
+          `UPDATE naiskos.system_update_assignments
+              SET status='assigned',last_error=NULL,updated_at=now()
+            WHERE campaign_id=$1 AND status='failed'`,
+          [campaignId],
+        );
+      }
+      await this.audit(client, `system.update.campaign.${action}`, null, null, {
+        campaignId,
+        actorTelegramId,
+      });
+      return true;
+    });
+  }
+
+  async advanceSystemUpdateCampaigns(): Promise<string[]> {
+    return transaction(this.database, async (client) => {
+      const campaigns = await client.query<{
+        id: string;
+        period: string;
+        activeStage: "pilot" | "ten-percent" | "remainder";
+        observeMinutes: number;
+      }>(
+        `SELECT id,period,active_stage AS "activeStage",
+                observe_minutes AS "observeMinutes"
+           FROM naiskos.system_update_campaigns
+          WHERE status='approved' FOR UPDATE`,
+      );
+      const changes: string[] = [];
+      for (const campaign of campaigns.rows) {
+        const state = await client.query<{
+          total: number;
+          observing: number;
+          failed: number;
+          unhealthy: number;
+          observationReady: boolean;
+        }>(
+          `SELECT count(*)::integer AS total,
+                  count(*) FILTER (WHERE a.status='observing')::integer AS observing,
+                  count(*) FILTER (WHERE a.status='failed')::integer AS failed,
+                  count(*) FILTER (
+                    WHERE r.last_seen_at IS NULL OR r.last_seen_at < now()-interval '15 minutes'
+                       OR r.agent_state NOT IN ('ready','syncing') OR r.last_error IS NOT NULL
+                       OR EXISTS (
+                         SELECT 1 FROM naiskos.frame_notifications n
+                          WHERE n.frame_id=a.frame_id AND n.resolved_at IS NULL
+                            AND n.dismissed_at IS NULL AND n.severity='error'
+                       )
+                  )::integer AS unhealthy,
+                  coalesce(bool_and(
+                    a.status='installed' OR
+                    (a.status='observing' AND a.updated_at <= now()-make_interval(mins=>$2))
+                  ),false) AS "observationReady"
+             FROM naiskos.system_update_assignments a
+             LEFT JOIN naiskos.frame_runtime r ON r.frame_id=a.frame_id
+            WHERE a.campaign_id=$1
+              AND CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                  <= CASE $3 WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END`,
+          [campaign.id, campaign.observeMinutes, campaign.activeStage],
+        );
+        const current = state.rows[0];
+        if (!current || current.total === 0 || current.failed > 0) {
+          if (current?.failed) {
+            await client.query(
+              "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1",
+              [campaign.id],
+            );
+            await this.audit(client, "system.update.campaign.auto-paused", null, null, {
+              campaignId: campaign.id,
+              period: campaign.period,
+              failed: current.failed,
+            });
+            changes.push(`paused:${campaign.id}`);
+          }
+          continue;
+        }
+        if (!current.observationReady || current.unhealthy > 0 || current.observing === 0) continue;
+        await client.query(
+          `UPDATE naiskos.system_update_assignments SET status='installed',observed_at=now(),updated_at=now()
+            WHERE campaign_id=$1 AND status='observing'`,
+          [campaign.id],
+        );
+        const next = await client.query<{ stage: "ten-percent" | "remainder" | null }>(
+          `SELECT CASE min(CASE stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END)
+                    WHEN 2 THEN 'ten-percent' WHEN 3 THEN 'remainder' ELSE NULL END AS stage
+             FROM naiskos.system_update_assignments
+            WHERE campaign_id=$1
+              AND CASE stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
+                  > CASE $2 WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END`,
+          [campaign.id, campaign.activeStage],
+        );
+        const nextStage = next.rows[0]?.stage ?? null;
+        if (nextStage) {
+          await client.query(
+            "UPDATE naiskos.system_update_campaigns SET active_stage=$2 WHERE id=$1",
+            [campaign.id, nextStage],
+          );
+          await this.audit(client, "system.update.campaign.stage-advanced", null, null, {
+            campaignId: campaign.id,
+            from: campaign.activeStage,
+            to: nextStage,
+          });
+          changes.push(`advanced:${campaign.id}:${nextStage}`);
+        } else {
+          await client.query(
+            "UPDATE naiskos.system_update_campaigns SET status='completed',completed_at=now() WHERE id=$1",
+            [campaign.id],
+          );
+          await this.audit(client, "system.update.campaign.completed", null, null, {
+            campaignId: campaign.id,
+            period: campaign.period,
+          });
+          changes.push(`completed:${campaign.id}`);
+        }
+      }
+      return changes;
     });
   }
 
@@ -2327,6 +2555,112 @@ export class Repository {
               }
             }
           }
+        } else if (kind === "system.maintenance.status") {
+          const mode = String(event.mode ?? "");
+          const status = String(event.status ?? "");
+          const packagesChanged = Number(event.packagesChanged);
+          const packagesPending = Number(event.packagesPending);
+          const rebootRequired = event.rebootRequired === true;
+          const campaignId = typeof event.campaignId === "string" ? event.campaignId : null;
+          const error = typeof event.error === "string" ? event.error.slice(0, 1_000) : null;
+          if (
+            !["security", "general"].includes(mode) ||
+            !["running", "succeeded", "failed"].includes(status) ||
+            !Number.isSafeInteger(packagesChanged) || packagesChanged < 0 || packagesChanged > 10_000 ||
+            !Number.isSafeInteger(packagesPending) || packagesPending < 0 || packagesPending > 10_000 ||
+            (mode === "general" && (!campaignId || !isUuid(campaignId)))
+          ) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-maintenance-status",
+            });
+            continue;
+          }
+          if (mode === "general" && campaignId) {
+            const assignmentStatus = status === "succeeded" ? "observing" : status;
+            const updated = await client.query(
+              `UPDATE naiskos.system_update_assignments
+                  SET status=$3,packages_changed=$4,reboot_required=$5,last_error=$6,
+                      started_at=CASE WHEN $3='running' THEN COALESCE(started_at,now()) ELSE started_at END,
+                      updated_at=now()
+                WHERE campaign_id=$1 AND frame_id=$2
+                  AND status IN ('assigned','running','observing')`,
+              [campaignId, frameId, assignmentStatus, packagesChanged, rebootRequired, error],
+            );
+            if (!updated.rowCount) {
+              await this.audit(client, `${kind}.ignored`, frameId, null, {
+                deviceEventId: id,
+                reason: "system-update-assignment-not-found",
+                campaignId,
+              });
+              continue;
+            }
+            if (status === "failed") {
+              await client.query(
+                "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1 AND status='approved'",
+                [campaignId],
+              );
+            }
+          }
+          if (frameName === null) {
+            const frame = await client.query<{ name: string }>(
+              "SELECT name FROM naiskos.frames WHERE id=$1",
+              [frameId],
+            );
+            frameName = frame.rows[0]?.name ?? frameId;
+          }
+          transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+            active: status === "failed",
+            recover: status === "succeeded",
+            kind: `system.maintenance.${mode}`,
+            severity: "error",
+            title: mode === "security"
+              ? "Falló la actualización de seguridad del SO"
+              : "Falló la actualización general del SO",
+            message: error ?? "La actualización terminó correctamente.",
+            dedupeKey: `system-maintenance-${mode}-failed`,
+            details: { mode, status, packagesChanged, packagesPending, rebootRequired, campaignId, deviceEventId: id },
+          }));
+          if (status === "succeeded") {
+            transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+              active: packagesPending > 0 || rebootRequired,
+              recover: packagesPending === 0 && !rebootRequired,
+              kind: "system.updates-pending",
+              severity: "warning",
+              title: rebootRequired
+                ? "El sistema requiere reinicio"
+                : `${packagesPending} actualización${packagesPending === 1 ? "" : "es"} del SO pendiente${packagesPending === 1 ? "" : "s"}`,
+              message: rebootRequired
+                ? `El mantenimiento terminó y el sistema solicita reinicio; quedan ${packagesPending} paquete${packagesPending === 1 ? "" : "s"} pendiente${packagesPending === 1 ? "" : "s"}.`
+                : "El mantenimiento terminó; los paquetes restantes se evaluarán en la siguiente ventana.",
+              dedupeKey: "system-updates-pending",
+              details: { mode, packagesChanged, packagesPending, rebootRequired, campaignId, deviceEventId: id },
+            }));
+          }
+          if (status === "succeeded" && (packagesChanged > 0 || rebootRequired)) {
+            const title = mode === "security"
+              ? "Actualización de seguridad aplicada"
+              : "Actualización general del sistema aplicada";
+            const message = `${packagesChanged} paquete${packagesChanged === 1 ? " fue actualizado" : "s fueron actualizados"}${rebootRequired ? "; el equipo se reiniciará dentro de la ventana nocturna" : ""}.`;
+            await upsertFrameNotification(client, {
+              frameId,
+              kind: `system.maintenance.${mode}`,
+              severity: "info",
+              title,
+              message,
+              dedupeKey: `system-maintenance-${mode}-completed`,
+              details: { mode, packagesChanged, packagesPending, rebootRequired, campaignId, deviceEventId: id },
+            });
+            transitions.push({
+              frameId,
+              frameName,
+              status: "opened",
+              severity: "info",
+              kind: `system.maintenance.${mode}`,
+              title,
+              message,
+            });
+          }
         } else if (kind === "system.updates.checked") {
           const count = Number(event.count);
           const rebootRequired = event.rebootRequired === true;
@@ -2374,7 +2708,7 @@ export class Repository {
                 : `${count} actualización${count === 1 ? "" : "es"} del SO pendiente${count === 1 ? "" : "s"}`,
               message: rebootRequired
                 ? `Hay ${count} paquete${count === 1 ? "" : "s"} pendiente${count === 1 ? "" : "s"} y el sistema solicita reinicio.`
-                : "La consulta es informativa: el marco todavía no las instala automáticamente.",
+                : "Los parches de seguridad se instalarán de noche; las actualizaciones generales siguen la campaña mensual escalonada.",
               dedupeKey: "system-updates-pending",
               details: { count, rebootRequired, deviceEventId: id },
             },
@@ -2521,6 +2855,23 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
+}
+
+export function monthlyGeneralSchedule(now: Date): {
+  period: string;
+  scheduledAt: Date;
+} {
+  // America/Lima no usa horario de verano. Se calcula en UTC-05 para que el
+  // primer domingo a las 00:30 sea estable aunque el servidor use otra zona.
+  const lima = new Date(now.getTime() - 5 * 60 * 60_000);
+  const year = lima.getUTCFullYear();
+  const month = lima.getUTCMonth();
+  const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const firstSunday = 1 + ((7 - firstDow) % 7);
+  return {
+    period: `${year}-${String(month + 1).padStart(2, "0")}`,
+    scheduledAt: new Date(Date.UTC(year, month, firstSunday, 5, 30)),
+  };
 }
 
 function sameAutomaticLocation(

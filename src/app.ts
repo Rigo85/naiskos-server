@@ -343,6 +343,27 @@ export async function buildApp(
     },
   );
 
+  app.get<{ Params: { frameId: string } }>(
+    "/api/v1/frames/:frameId/system-maintenance",
+    async (request, reply) => {
+      const frame = await authenticatedFrame(request, repository);
+      if (!frame || frame.id !== request.params.frameId)
+        return reply.code(401).send({ error: "No autorizado" });
+      const permit = await repository.getSystemUpdatePermit(frame.id);
+      if (!permit) return reply.code(204).send();
+      return {
+        campaignId: permit.campaignId,
+        mode: permit.kind,
+        period: permit.period,
+        timezone: permit.timezone,
+        maintenanceWindow: {
+          from: permit.maintenanceFrom,
+          until: permit.maintenanceUntil,
+        },
+      };
+    },
+  );
+
   app.get<{
     Params: { releaseId: string; asset: "manifest" | "signature" | "archive" };
   }>(
@@ -456,7 +477,7 @@ export async function notifyTelemetryTransitions(
         adminId,
         transition.status === "resolved"
           ? `✅ Recuperado: ${transition.frameName}\n${transition.title}`
-          : `${transition.severity === "error" ? "🚨" : "⚠️"} ${transition.frameName}\n${transition.title}\n${transition.message}`,
+          : `${transition.severity === "error" ? "🚨" : transition.severity === "warning" ? "⚠️" : "ℹ️"} ${transition.frameName}\n${transition.title}\n${transition.message}`,
       ),
     ),
   );

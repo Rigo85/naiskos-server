@@ -11,6 +11,7 @@ import {
   FleetAlert,
   FleetFrameStatus,
   ReleaseCampaignSummary,
+  SystemUpdateCampaignSummary,
 } from "../src/repository.js";
 import {
   extractMedia,
@@ -39,6 +40,7 @@ class StubRepository implements TelegramRepository {
     status: "missing",
   };
   campaigns: ReleaseCampaignSummary[] = [];
+  systemCampaigns: SystemUpdateCampaignSummary[] = [];
   frames: Array<{ id: string; name: string }> = [];
   enqueued: IngestJobPayload[] = [];
 
@@ -173,6 +175,20 @@ class StubRepository implements TelegramRepository {
     const campaign = this.campaigns.find((candidate) => candidate.id === campaignId);
     if (!campaign) return false;
     campaign.status = action === "approve" ? "approved" : action === "pause" ? "paused" : "cancelled";
+    return true;
+  }
+
+  async listSystemUpdateCampaigns(): Promise<SystemUpdateCampaignSummary[]> {
+    return this.systemCampaigns;
+  }
+
+  async transitionSystemUpdateCampaign(
+    campaignId: string,
+    action: "resume" | "pause" | "cancel",
+  ): Promise<boolean> {
+    const campaign = this.systemCampaigns.find((candidate) => candidate.id === campaignId);
+    if (!campaign) return false;
+    campaign.status = action === "resume" ? "approved" : action === "pause" ? "paused" : "cancelled";
     return true;
   }
 }
@@ -348,6 +364,50 @@ describe("entrada de Telegram", () => {
     });
     expect(telegram.edits[0]?.text).toContain("Estado: approved");
     expect(JSON.stringify(telegram.edits[0]?.markup)).toContain("release-pause");
+  });
+
+  it("consulta y pausa la campaña mensual del SO sin reenviar el listado", async () => {
+    const repository = new StubRepository();
+    repository.systemCampaigns = [{
+      id: "33333333-3333-4333-8333-333333333333",
+      period: "2026-09",
+      status: "approved",
+      activeStage: "pilot",
+      frames: 1,
+      installed: 0,
+      failed: 0,
+      scheduledAt: new Date("2026-09-06T05:30:00.000Z"),
+    }];
+    const telegram = new StubTelegram();
+    const handler = new TelegramHandler(telegramConfig, repository, telegram);
+
+    await handler.handle({
+      update_id: 90,
+      message: {
+        message_id: 90,
+        chat: { id: 99 },
+        from: { id: 99, first_name: "Admin" },
+        text: "/sistema",
+      },
+    });
+    expect(telegram.messages).toHaveLength(1);
+    expect(telegram.messages[0]?.text).toContain("SO 2026-09");
+    expect(JSON.stringify(telegram.messages[0]?.markup)).toContain("system-pause");
+
+    telegram.messages.length = 0;
+    await handler.handle({
+      update_id: 91,
+      callback_query: {
+        id: "callback-91",
+        from: { id: 99, first_name: "Admin" },
+        data: "system-pause:33333333-3333-4333-8333-333333333333",
+        message: { message_id: 701, chat: { id: 99 } },
+      },
+    });
+    expect(telegram.messages).toHaveLength(0);
+    expect(telegram.edits).toHaveLength(1);
+    expect(telegram.edits[0]?.text).toContain("Estado: paused");
+    expect(JSON.stringify(telegram.edits[0]?.markup)).toContain("system-resume");
   });
 
   it("permite consultar flota y alertas sólo al administrador", async () => {

@@ -11,6 +11,7 @@ import {
   TelegramApprovalResult,
   TelegramUser,
   ReleaseCampaignSummary,
+  SystemUpdateCampaignSummary,
 } from "./repository.js";
 
 interface TelegramFrom {
@@ -130,6 +131,12 @@ export interface TelegramRepository {
   transitionReleaseCampaign(
     campaignId: string,
     action: "approve" | "pause" | "cancel",
+    actorTelegramId: string,
+  ): Promise<boolean>;
+  listSystemUpdateCampaigns(): Promise<SystemUpdateCampaignSummary[]>;
+  transitionSystemUpdateCampaign(
+    campaignId: string,
+    action: "resume" | "pause" | "cancel",
     actorTelegramId: string,
   ): Promise<boolean>;
 }
@@ -273,7 +280,7 @@ export class TelegramHandler {
       );
       return;
     }
-    const fleetCommand = message.text?.match(/^\/(marcos|alertas|marco|versiones)(?:@\w+)?(?:\s+(.*))?$/i);
+    const fleetCommand = message.text?.match(/^\/(marcos|alertas|marco|versiones|sistema)(?:@\w+)?(?:\s+(.*))?$/i);
     if (fleetCommand) {
       if (!this.config.telegramAdminIds.has(telegramId)) {
         await this.telegram.sendMessage(
@@ -289,6 +296,8 @@ export class TelegramHandler {
         await this.sendFleetAlerts(message.chat.id);
       } else if (command === "versiones") {
         await this.sendReleaseCampaigns(message.chat.id);
+      } else if (command === "sistema") {
+        await this.sendSystemUpdateCampaigns(message.chat.id);
       } else {
         const query = fleetCommand[2]?.trim();
         if (!query) {
@@ -529,6 +538,40 @@ export class TelegramHandler {
         } else {
           await this.telegram.sendMessage(
             actorId,
+            presentation.text,
+            presentation.replyMarkup,
+          );
+        }
+      }
+      return;
+    }
+    if (
+      ["system-resume", "system-pause", "system-cancel"].includes(action ?? "") &&
+      targetId && this.config.telegramAdminIds.has(actorId)
+    ) {
+      const transition = action === "system-resume"
+        ? "resume"
+        : action === "system-pause"
+          ? "pause"
+          : "cancel";
+      const changed = await this.repository.transitionSystemUpdateCampaign(
+        targetId,
+        transition,
+        actorId,
+      );
+      await this.telegram.answerCallbackQuery(
+        query.id,
+        changed ? "Campaña del sistema actualizada." : "La campaña ya cambió o la transición no es válida.",
+      );
+      const campaign = (await this.repository.listSystemUpdateCampaigns()).find(
+        (candidate) => candidate.id === targetId,
+      );
+      if (campaign) {
+        const presentation = systemUpdateCampaignPresentation(campaign);
+        if (query.message) {
+          await this.telegram.editMessageText(
+            query.message.chat.id,
+            query.message.message_id,
             presentation.text,
             presentation.replyMarkup,
           );
@@ -814,6 +857,18 @@ export class TelegramHandler {
     }
   }
 
+  private async sendSystemUpdateCampaigns(chatId: number | string): Promise<void> {
+    const campaigns = await this.repository.listSystemUpdateCampaigns();
+    if (!campaigns.length) {
+      await this.telegram.sendMessage(chatId, "No hay campañas mensuales del sistema.");
+      return;
+    }
+    for (const campaign of campaigns.slice(0, 6)) {
+      const presentation = systemUpdateCampaignPresentation(campaign);
+      await this.telegram.sendMessage(chatId, presentation.text, presentation.replyMarkup);
+    }
+  }
+
   private async replyIfRestricted(
     chatId: number,
     user: TelegramUser,
@@ -858,6 +913,27 @@ function releaseCampaignPresentation(campaign: ReleaseCampaignSummary): {
         : undefined;
   return {
     text: `${campaign.releaseId}\nEstado: ${campaign.status}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
+    ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
+  };
+}
+
+function systemUpdateCampaignPresentation(campaign: SystemUpdateCampaignSummary): {
+  text: string;
+  replyMarkup?: object;
+} {
+  const buttons = campaign.status === "approved"
+    ? [[
+        { text: "Pausar", callback_data: `system-pause:${campaign.id}` },
+        { text: "Cancelar", callback_data: `system-cancel:${campaign.id}` },
+      ]]
+    : campaign.status === "paused"
+      ? [[
+          { text: "Reanudar", callback_data: `system-resume:${campaign.id}` },
+          { text: "Cancelar", callback_data: `system-cancel:${campaign.id}` },
+        ]]
+      : undefined;
+  return {
+    text: `SO ${campaign.period}\nEstado: ${campaign.status} · etapa: ${campaign.activeStage}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
     ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
   };
 }
