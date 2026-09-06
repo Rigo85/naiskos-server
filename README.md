@@ -296,3 +296,9 @@ primer recorrido. Consulta
 La política de privacidad publicable está en
 [`docs/privacy-policy-es.md`](docs/privacy-policy-es.md) y el texto del perfil
 del bot en [`docs/telegram-bot-profile-es.md`](docs/telegram-bot-profile-es.md).
+
+## Licencia
+
+Naiskos Server se distribuye bajo la
+[GNU Affero General Public License v3.0](LICENSE), exclusivamente en su versión
+3 (`AGPL-3.0-only`).
