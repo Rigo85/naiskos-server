@@ -17,6 +17,17 @@ async function monitorFleet(): Promise<void> {
   if (monitorRunning) return;
   monitorRunning = true;
   try {
+    const expiredReleases = await fleetRepository.expireReleaseCampaigns();
+    if (expiredReleases.length) {
+      await Promise.allSettled([...config.telegramAdminIds].flatMap((adminId) =>
+        expiredReleases.map((change) =>
+          telegram.sendMessage(
+            adminId,
+            `⌛ Campaña Naiskos vencida.\nRelease: ${change.releaseId}\nCampaña: ${change.campaignId}`,
+          ),
+        ),
+      ));
+    }
     const monthlyCampaign = await fleetRepository.ensureMonthlySystemUpdateCampaign();
     if (monthlyCampaign) {
       await Promise.allSettled([...config.telegramAdminIds].map((adminId) =>

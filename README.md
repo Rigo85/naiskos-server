@@ -229,7 +229,8 @@ npm run release-admin -- publish \
 
 npm run release-admin -- campaign:create \
   --release-id 20260901-ejemplo-001 \
-  --frames UUID_DEL_MARCO
+  --frames UUID_DEL_MARCO \
+  --expires-hours 72
 
 npm run release-admin -- campaign:approve --campaign-id UUID_DE_CAMPANA
 ```
@@ -239,6 +240,11 @@ copia al servidor. La aprobación es por campaña y queda auditada. El CLI sirve
 como recuperación administrativa; `/versiones` permite aprobar, pausar,
 reanudar o cancelar. Después de una acción el bot edita únicamente la tarjeta
 afectada y no vuelve a enviar el historial completo.
+
+Cada campaña vence después de 72 horas de forma predeterminada. El plazo se
+puede acotar entre 1 y 720 horas con `--expires-hours`; una campaña vencida
+deja de autorizar descargas y activaciones, pasa a `cancelled` y genera una
+traza `release.campaign.expired`.
 
 ## Despliegue
 

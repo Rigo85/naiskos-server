@@ -11,7 +11,7 @@ import { createDatabase, transaction } from "./db.js";
 const HELP = `Naiskos software releases
 
   npm run release-admin -- publish --manifest release.json --signature release.json.sig --archive release.tar.gz
-  npm run release-admin -- campaign:create --release-id <id> --frames <uuid,uuid> [--from 00:00] [--until 06:00]
+  npm run release-admin -- campaign:create --release-id <id> --frames <uuid,uuid> [--from 00:00] [--until 06:00] [--expires-hours 72]
   npm run release-admin -- campaign:approve --campaign-id <uuid>
   npm run release-admin -- list
 
@@ -106,6 +106,7 @@ try {
         from: { type: "string", default: "00:00" },
         until: { type: "string", default: "06:00" },
         "observe-minutes": { type: "string", default: "60" },
+        "expires-hours": { type: "string", default: "72" },
       },
     }).values;
     const releaseId = required(args["release-id"], "--release-id");
@@ -121,13 +122,18 @@ try {
     const observeMinutes = Number(args["observe-minutes"]);
     if (!Number.isInteger(observeMinutes) || observeMinutes < 1 || observeMinutes > 10080)
       throw new Error("--observe-minutes debe estar entre 1 y 10080.");
+    const expiresHours = Number(args["expires-hours"]);
+    if (!Number.isInteger(expiresHours) || expiresHours < 1 || expiresHours > 720)
+      throw new Error("--expires-hours debe estar entre 1 y 720.");
+    const expiresAt = new Date(Date.now() + expiresHours * 60 * 60_000);
     const campaignId = randomUUID();
     await transaction(database, async (client) => {
       await client.query(
         `INSERT INTO naiskos.release_campaigns
-           (id,release_id,status,maintenance_from,maintenance_until,observe_minutes,created_by)
-         VALUES ($1,$2,'draft',$3,$4,$5,'admin-cli')`,
-        [campaignId, releaseId, from, until, observeMinutes],
+           (id,release_id,status,maintenance_from,maintenance_until,observe_minutes,
+            expires_at,created_by)
+         VALUES ($1,$2,'draft',$3,$4,$5,$6,'admin-cli')`,
+        [campaignId, releaseId, from, until, observeMinutes, expiresAt],
       );
       const uniqueFrames = [...new Set(frameIds)].sort();
       const pilotLimit = Math.max(1, Math.ceil(uniqueFrames.length * 0.01));
@@ -146,10 +152,15 @@ try {
       }
       await client.query(
         `INSERT INTO naiskos.audit_log (action,details) VALUES ('release.campaign.created',$1)`,
-        [JSON.stringify({ campaignId, releaseId, frameIds })],
+        [JSON.stringify({
+          campaignId,
+          releaseId,
+          frameIds,
+          expiresAt: expiresAt.toISOString(),
+        })],
       );
     });
-    console.log(`Campaña borrador: ${campaignId}`);
+    console.log(`Campaña borrador: ${campaignId} (vence ${expiresAt.toISOString()})`);
   } else if (command === "campaign:approve") {
     const args = parseArgs({
       args: rest,
@@ -161,10 +172,12 @@ try {
     const result = await database.query(
       `UPDATE naiskos.release_campaigns
           SET status='approved', approved_at=now(), approved_by='admin-cli'
-        WHERE id=$1 AND status='draft'`,
+        WHERE id=$1 AND status='draft' AND expires_at > now()`,
       [campaignId],
     );
-    if (!result.rowCount) throw new Error("La campaña no existe o no está en borrador.");
+    if (!result.rowCount) {
+      throw new Error("La campaña no existe, no está en borrador o ya venció.");
+    }
     await database.query(
       `INSERT INTO naiskos.audit_log (action,details) VALUES ('release.campaign.approved',$1)`,
       [JSON.stringify({ campaignId })],
@@ -172,7 +185,7 @@ try {
     console.log(`Campaña aprobada: ${campaignId}`);
   } else if (command === "list") {
     const result = await database.query(
-      `SELECT c.id,c.release_id,c.status,c.created_at,
+      `SELECT c.id,c.release_id,c.status,c.created_at,c.expires_at,
               count(a.frame_id)::integer AS frames,
               count(*) FILTER (WHERE a.status='installed')::integer AS installed,
               count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed

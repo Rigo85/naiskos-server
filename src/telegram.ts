@@ -912,7 +912,7 @@ function releaseCampaignPresentation(campaign: ReleaseCampaignSummary): {
           ]]
         : undefined;
   return {
-    text: `${campaign.releaseId}\nEstado: ${campaign.status}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
+    text: `${campaign.releaseId}\nEstado: ${campaign.status}\nVence: ${campaign.expiresAt.toISOString()}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
     ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
   };
 }

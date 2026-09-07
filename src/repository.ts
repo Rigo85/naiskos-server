@@ -180,6 +180,7 @@ export interface SoftwareAssignment {
   maintenanceFrom: string;
   maintenanceUntil: string;
   observeMinutes: number;
+  expiresAt: Date;
   manifest: Record<string, unknown>;
   manifestPath: string;
   signaturePath: string;
@@ -196,6 +197,7 @@ export interface ReleaseCampaignSummary {
   installed: number;
   failed: number;
   createdAt: Date;
+  expiresAt: Date;
 }
 
 export interface SystemUpdatePermit {
@@ -238,7 +240,8 @@ export class Repository {
               a.status, c.timezone,
               to_char(c.maintenance_from, 'HH24:MI') AS "maintenanceFrom",
               to_char(c.maintenance_until, 'HH24:MI') AS "maintenanceUntil",
-              c.observe_minutes AS "observeMinutes", r.manifest,
+              c.observe_minutes AS "observeMinutes", c.expires_at AS "expiresAt",
+              r.manifest,
               r.manifest_path AS "manifestPath",
               r.signature_path AS "signaturePath",
               r.archive_path AS "archivePath",
@@ -248,6 +251,7 @@ export class Repository {
          JOIN naiskos.release_campaigns c ON c.id=a.campaign_id
          JOIN naiskos.software_releases r ON r.release_id=c.release_id
         WHERE a.frame_id=$1 AND c.status='approved' AND r.status='published'
+          AND c.expires_at > now()
           AND a.status IN ('assigned','downloading','verified','awaiting_window')
           AND CASE a.stage
                 WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3
@@ -276,7 +280,8 @@ export class Repository {
          JOIN naiskos.release_campaigns c ON c.id=a.campaign_id
          JOIN naiskos.software_releases r ON r.release_id=c.release_id
         WHERE a.frame_id=$1 AND r.release_id=$2
-          AND c.status='approved' AND r.status='published'
+          AND c.status='approved' AND c.expires_at > now()
+          AND r.status='published'
         ORDER BY a.assigned_at DESC LIMIT 1`,
       [frameId, releaseId],
     );
@@ -285,7 +290,8 @@ export class Repository {
 
   async listReleaseCampaigns(): Promise<ReleaseCampaignSummary[]> {
     const result = await this.database.query<ReleaseCampaignSummary>(
-      `SELECT c.id, c.release_id AS "releaseId", c.status, c.created_at AS "createdAt",
+      `SELECT c.id, c.release_id AS "releaseId", c.status,
+              c.created_at AS "createdAt", c.expires_at AS "expiresAt",
               count(a.frame_id)::integer AS frames,
               count(*) FILTER (WHERE a.status='installed')::integer AS installed,
               count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed
@@ -306,7 +312,7 @@ export class Repository {
         action === "approve"
           ? `UPDATE naiskos.release_campaigns SET status='approved',
                 approved_at=COALESCE(approved_at,now()), approved_by=$2
-              WHERE id=$1 AND status IN ('draft','paused')`
+              WHERE id=$1 AND status IN ('draft','paused') AND expires_at > now()`
           : action === "pause"
             ? `UPDATE naiskos.release_campaigns SET status='paused'
                 WHERE id=$1 AND status='approved'`
@@ -324,6 +330,35 @@ export class Repository {
         ],
       );
       return true;
+    });
+  }
+
+  async expireReleaseCampaigns(
+    now = new Date(),
+  ): Promise<Array<{ campaignId: string; releaseId: string }>> {
+    return transaction(this.database, async (client) => {
+      const expired = await client.query<{ id: string; releaseId: string }>(
+        `UPDATE naiskos.release_campaigns
+            SET status='cancelled'
+          WHERE status IN ('draft','approved','paused') AND expires_at <= $1
+        RETURNING id, release_id AS "releaseId"`,
+        [now],
+      );
+      for (const campaign of expired.rows) {
+        await client.query(
+          `INSERT INTO naiskos.audit_log (action,details)
+           VALUES ('release.campaign.expired',$1)`,
+          [JSON.stringify({
+            campaignId: campaign.id,
+            releaseId: campaign.releaseId,
+            expiredAt: now.toISOString(),
+          })],
+        );
+      }
+      return expired.rows.map((campaign) => ({
+        campaignId: campaign.id,
+        releaseId: campaign.releaseId,
+      }));
     });
   }
 

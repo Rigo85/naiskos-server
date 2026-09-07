@@ -334,6 +334,7 @@ export async function buildApp(
           until: assignment.maintenanceUntil,
         },
         observeMinutes: assignment.observeMinutes,
+        expiresAt: assignment.expiresAt.toISOString(),
         archiveSizeBytes: Number(assignment.archiveSizeBytes),
         archiveSha256: assignment.archiveSha256,
         manifestUrl: `${base}/manifest`,

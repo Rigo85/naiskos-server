@@ -332,6 +332,7 @@ describe("entrada de Telegram", () => {
         installed: 0,
         failed: 0,
         createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 72 * 60 * 60_000),
       },
       {
         id: "22222222-2222-4222-8222-222222222222",
@@ -341,6 +342,7 @@ describe("entrada de Telegram", () => {
         installed: 1,
         failed: 0,
         createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 72 * 60 * 60_000),
       },
     ];
     const telegram = new StubTelegram();
