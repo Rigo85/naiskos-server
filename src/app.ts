@@ -354,9 +354,12 @@ export async function buildApp(
       if (!permit) return reply.code(204).send();
       return {
         campaignId: permit.campaignId,
+        attemptId: permit.attemptId,
         mode: permit.kind,
         period: permit.period,
         timezone: permit.timezone,
+        serverTime: new Date().toISOString(),
+        expiresAt: permit.expiresAt.toISOString(),
         maintenanceWindow: {
           from: permit.maintenanceFrom,
           until: permit.maintenanceUntil,

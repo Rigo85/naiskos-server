@@ -7,6 +7,7 @@ describe("campaña mensual del sistema", () => {
     expect(monthlyGeneralSchedule(new Date("2026-09-05T20:00:00Z"))).toEqual({
       period: "2026-09",
       scheduledAt: new Date("2026-09-06T05:30:00.000Z"),
+      expiresAt: new Date("2026-09-13T05:30:00.000Z"),
     });
   });
 
@@ -14,6 +15,7 @@ describe("campaña mensual del sistema", () => {
     expect(monthlyGeneralSchedule(new Date("2026-11-15T12:00:00Z"))).toEqual({
       period: "2026-11",
       scheduledAt: new Date("2026-11-01T05:30:00.000Z"),
+      expiresAt: new Date("2026-11-08T05:30:00.000Z"),
     });
   });
 });

@@ -202,11 +202,13 @@ export interface ReleaseCampaignSummary {
 
 export interface SystemUpdatePermit {
   campaignId: string;
+  attemptId: string;
   kind: "general";
   period: string;
   timezone: string;
   maintenanceFrom: string;
   maintenanceUntil: string;
+  expiresAt: Date;
 }
 
 export interface SystemUpdateCampaignSummary {
@@ -218,6 +220,7 @@ export interface SystemUpdateCampaignSummary {
   installed: number;
   failed: number;
   scheduledAt: Date;
+  expiresAt: Date;
 }
 
 export class Repository {
@@ -364,7 +367,7 @@ export class Repository {
 
   async ensureMonthlySystemUpdateCampaign(now = new Date()): Promise<string | null> {
     const schedule = monthlyGeneralSchedule(now);
-    if (now < schedule.scheduledAt) return null;
+    if (now < schedule.scheduledAt || now >= schedule.expiresAt) return null;
     return transaction(this.database, async (client) => {
       const frames = await client.query<{ id: string }>(
         "SELECT id FROM naiskos.frames WHERE status='active' ORDER BY id",
@@ -373,13 +376,16 @@ export class Repository {
       const campaignId = randomUUID();
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO naiskos.system_update_campaigns
-           (id,kind,period,status,scheduled_at)
-         VALUES ($1,'general',$2,'approved',$3)
+           (id,kind,period,status,scheduled_at,expires_at)
+         VALUES ($1,'general',$2,'approved',$3,$4)
          ON CONFLICT (kind,period) DO NOTHING RETURNING id`,
-        [campaignId, schedule.period, schedule.scheduledAt],
+        [campaignId, schedule.period, schedule.scheduledAt, schedule.expiresAt],
       );
       if (!inserted.rowCount) return null;
-      const uniqueFrames = frames.rows.map((frame) => frame.id);
+      const periodSeed = Number(schedule.period.replace("-", ""));
+      const uniqueFrames = frames.rows
+        .map((frame) => frame.id)
+        .sort((left, right) => stableRank(left, periodSeed) - stableRank(right, periodSeed));
       const pilotLimit = Math.max(1, Math.ceil(uniqueFrames.length * 0.01));
       const tenPercentLimit = Math.max(pilotLimit, Math.ceil(uniqueFrames.length * 0.1));
       for (const [index, frameId] of uniqueFrames.entries()) {
@@ -390,8 +396,8 @@ export class Repository {
             : "remainder";
         await client.query(
           `INSERT INTO naiskos.system_update_assignments
-             (campaign_id,frame_id,stage) VALUES ($1,$2,$3)`,
-          [campaignId, frameId, stage],
+             (campaign_id,frame_id,stage,attempt_id) VALUES ($1,$2,$3,$4)`,
+          [campaignId, frameId, stage, randomUUID()],
         );
       }
       await this.audit(client, "system.update.campaign.created", null, null, {
@@ -399,6 +405,7 @@ export class Repository {
         period: schedule.period,
         frames: uniqueFrames.length,
         scheduledAt: schedule.scheduledAt.toISOString(),
+        expiresAt: schedule.expiresAt.toISOString(),
       });
       return campaignId;
     });
@@ -406,13 +413,15 @@ export class Repository {
 
   async getSystemUpdatePermit(frameId: string): Promise<SystemUpdatePermit | null> {
     const result = await this.database.query<SystemUpdatePermit>(
-      `SELECT c.id AS "campaignId", c.kind, c.period, c.timezone,
+      `SELECT c.id AS "campaignId", a.attempt_id AS "attemptId",
+              c.kind, c.period, c.timezone,
               to_char(c.maintenance_from, 'HH24:MI') AS "maintenanceFrom",
-              to_char(c.maintenance_until, 'HH24:MI') AS "maintenanceUntil"
+              to_char(c.maintenance_until, 'HH24:MI') AS "maintenanceUntil",
+              c.expires_at AS "expiresAt"
          FROM naiskos.system_update_assignments a
          JOIN naiskos.system_update_campaigns c ON c.id=a.campaign_id
         WHERE a.frame_id=$1 AND c.status='approved' AND c.scheduled_at <= now()
-          AND a.status='assigned'
+          AND c.expires_at > now() AND a.status IN ('assigned','deferred')
           AND CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
               <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
         ORDER BY c.scheduled_at DESC LIMIT 1`,
@@ -424,7 +433,7 @@ export class Repository {
   async listSystemUpdateCampaigns(): Promise<SystemUpdateCampaignSummary[]> {
     const result = await this.database.query<SystemUpdateCampaignSummary>(
       `SELECT c.id,c.period,c.status,c.active_stage AS "activeStage",
-              c.scheduled_at AS "scheduledAt",
+              c.scheduled_at AS "scheduledAt", c.expires_at AS "expiresAt",
               count(a.frame_id)::integer AS frames,
               count(*) FILTER (WHERE a.status='installed')::integer AS installed,
               count(*) FILTER (WHERE a.status='failed')::integer AS failed
@@ -443,7 +452,7 @@ export class Repository {
     return transaction(this.database, async (client) => {
       const result = await client.query(
         action === "resume"
-          ? "UPDATE naiskos.system_update_campaigns SET status='approved' WHERE id=$1 AND status='paused'"
+          ? "UPDATE naiskos.system_update_campaigns SET status='approved' WHERE id=$1 AND status='paused' AND expires_at>now()"
           : action === "pause"
             ? "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1 AND status='approved'"
             : "UPDATE naiskos.system_update_campaigns SET status='cancelled' WHERE id=$1 AND status IN ('approved','paused')",
@@ -453,7 +462,7 @@ export class Repository {
       if (action === "resume") {
         await client.query(
           `UPDATE naiskos.system_update_assignments
-              SET status='assigned',last_error=NULL,updated_at=now()
+              SET status='assigned',attempt_id=gen_random_uuid(),last_error=NULL,updated_at=now()
             WHERE campaign_id=$1 AND status='failed'`,
           [campaignId],
         );
@@ -468,19 +477,54 @@ export class Repository {
 
   async advanceSystemUpdateCampaigns(): Promise<string[]> {
     return transaction(this.database, async (client) => {
+      const changes: string[] = [];
+      const expired = await client.query<{ id: string; period: string }>(
+        `UPDATE naiskos.system_update_campaigns
+            SET status='cancelled'
+          WHERE status IN ('approved','paused') AND expires_at <= now()
+        RETURNING id,period`,
+      );
+      for (const campaign of expired.rows) {
+        await this.audit(client, "system.update.campaign.expired", null, null, {
+          campaignId: campaign.id,
+          period: campaign.period,
+        });
+        changes.push(`expired:${campaign.id}`);
+      }
       const campaigns = await client.query<{
         id: string;
         period: string;
         activeStage: "pilot" | "ten-percent" | "remainder";
         observeMinutes: number;
+        failureThresholdPercent: number;
       }>(
         `SELECT id,period,active_stage AS "activeStage",
-                observe_minutes AS "observeMinutes"
+                observe_minutes AS "observeMinutes",
+                failure_threshold_percent::float8 AS "failureThresholdPercent"
            FROM naiskos.system_update_campaigns
           WHERE status='approved' FOR UPDATE`,
       );
-      const changes: string[] = [];
       for (const campaign of campaigns.rows) {
+        const timedOut = await client.query(
+          `UPDATE naiskos.system_update_assignments
+              SET status='failed',last_error='El intento excedió tres horas sin resultado final',updated_at=now()
+            WHERE campaign_id=$1
+              AND status IN ('running','reboot_pending','verifying')
+              AND updated_at < now()-interval '3 hours'`,
+          [campaign.id],
+        );
+        if (timedOut.rowCount) {
+          await client.query(
+            "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1",
+            [campaign.id],
+          );
+          await this.audit(client, "system.update.campaign.attempt-timeout", null, null, {
+            campaignId: campaign.id,
+            attempts: timedOut.rowCount,
+          });
+          changes.push(`paused:${campaign.id}:attempt-timeout`);
+          continue;
+        }
         const state = await client.query<{
           total: number;
           observing: number;
@@ -492,16 +536,18 @@ export class Repository {
                   count(*) FILTER (WHERE a.status='observing')::integer AS observing,
                   count(*) FILTER (WHERE a.status='failed')::integer AS failed,
                   count(*) FILTER (
-                    WHERE r.last_seen_at IS NULL OR r.last_seen_at < now()-interval '15 minutes'
+                    WHERE a.status <> 'failed' AND (
+                       r.last_seen_at IS NULL OR r.last_seen_at < now()-interval '15 minutes'
                        OR r.agent_state NOT IN ('ready','syncing') OR r.last_error IS NOT NULL
                        OR EXISTS (
                          SELECT 1 FROM naiskos.frame_notifications n
                           WHERE n.frame_id=a.frame_id AND n.resolved_at IS NULL
                             AND n.dismissed_at IS NULL AND n.severity='error'
                        )
+                    )
                   )::integer AS unhealthy,
                   coalesce(bool_and(
-                    a.status='installed' OR
+                    a.status IN ('installed','failed') OR
                     (a.status='observing' AND a.updated_at <= now()-make_interval(mins=>$2))
                   ),false) AS "observationReady"
              FROM naiskos.system_update_assignments a
@@ -512,8 +558,9 @@ export class Repository {
           [campaign.id, campaign.observeMinutes, campaign.activeStage],
         );
         const current = state.rows[0];
-        if (!current || current.total === 0 || current.failed > 0) {
-          if (current?.failed) {
+        if (!current || current.total === 0) continue;
+        const failurePercent = (current.failed / current.total) * 100;
+        if (current.failed > 0 && failurePercent >= campaign.failureThresholdPercent) {
             await client.query(
               "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1",
               [campaign.id],
@@ -522,9 +569,11 @@ export class Repository {
               campaignId: campaign.id,
               period: campaign.period,
               failed: current.failed,
+              total: current.total,
+              failurePercent,
+              threshold: campaign.failureThresholdPercent,
             });
             changes.push(`paused:${campaign.id}`);
-          }
           continue;
         }
         if (!current.observationReady || current.unhealthy > 0 || current.observing === 0) continue;
@@ -2597,13 +2646,17 @@ export class Repository {
           const packagesPending = Number(event.packagesPending);
           const rebootRequired = event.rebootRequired === true;
           const campaignId = typeof event.campaignId === "string" ? event.campaignId : null;
+          const attemptId = typeof event.attemptId === "string" ? event.attemptId : null;
+          const errorCode = typeof event.errorCode === "string" ? event.errorCode.slice(0, 80) : null;
           const error = typeof event.error === "string" ? event.error.slice(0, 1_000) : null;
           if (
             !["security", "general"].includes(mode) ||
-            !["running", "succeeded", "failed"].includes(status) ||
+            !["authorized", "preflight", "running", "deferred", "reboot_pending", "verifying", "succeeded", "failed"].includes(status) ||
             !Number.isSafeInteger(packagesChanged) || packagesChanged < 0 || packagesChanged > 10_000 ||
             !Number.isSafeInteger(packagesPending) || packagesPending < 0 || packagesPending > 10_000 ||
-            (mode === "general" && (!campaignId || !isUuid(campaignId)))
+            (campaignId !== null && !isUuid(campaignId)) ||
+            (attemptId !== null && !isUuid(attemptId)) ||
+            (mode === "general" && !campaignId && !["deferred", "failed"].includes(status))
           ) {
             await this.audit(client, `${kind}.ignored`, frameId, null, {
               deviceEventId: id,
@@ -2612,15 +2665,30 @@ export class Repository {
             continue;
           }
           if (mode === "general" && campaignId) {
-            const assignmentStatus = status === "succeeded" ? "observing" : status;
+            const assignmentStatus = status === "succeeded"
+              ? "observing"
+              : ["authorized", "preflight"].includes(status)
+                ? "running"
+                : status;
             const updated = await client.query(
               `UPDATE naiskos.system_update_assignments
                   SET status=$3,packages_changed=$4,reboot_required=$5,last_error=$6,
                       started_at=CASE WHEN $3='running' THEN COALESCE(started_at,now()) ELSE started_at END,
+                      last_attempt_at=now(),
+                      verified_at=CASE WHEN $3='observing' THEN now() ELSE verified_at END,
                       updated_at=now()
                 WHERE campaign_id=$1 AND frame_id=$2
-                  AND status IN ('assigned','running','observing')`,
-              [campaignId, frameId, assignmentStatus, packagesChanged, rebootRequired, error],
+                  AND ($7::uuid IS NULL OR attempt_id=$7)
+                  AND CASE
+                    WHEN $8 IN ('authorized','preflight','running','deferred')
+                      THEN status IN ('assigned','running','deferred')
+                    WHEN $8='reboot_pending' THEN status IN ('running','reboot_pending')
+                    WHEN $8='verifying' THEN status IN ('reboot_pending','verifying')
+                    WHEN $8='succeeded' THEN status IN ('running','reboot_pending','verifying','observing')
+                    WHEN $8='failed' THEN status IN ('assigned','running','deferred','reboot_pending','verifying','observing')
+                    ELSE false
+                  END`,
+              [campaignId, frameId, assignmentStatus, packagesChanged, rebootRequired, error, attemptId, status],
             );
             if (!updated.rowCount) {
               await this.audit(client, `${kind}.ignored`, frameId, null, {
@@ -2630,12 +2698,6 @@ export class Repository {
               });
               continue;
             }
-            if (status === "failed") {
-              await client.query(
-                "UPDATE naiskos.system_update_campaigns SET status='paused' WHERE id=$1 AND status='approved'",
-                [campaignId],
-              );
-            }
           }
           if (frameName === null) {
             const frame = await client.query<{ name: string }>(
@@ -2644,17 +2706,20 @@ export class Repository {
             );
             frameName = frame.rows[0]?.name ?? frameId;
           }
+          const authorizationFailure = status === "deferred" && errorCode === "authorization_failed";
           transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
-            active: status === "failed",
-            recover: status === "succeeded",
+            active: status === "failed" || authorizationFailure,
+            recover: ["authorized", "preflight", "running", "succeeded"].includes(status),
             kind: `system.maintenance.${mode}`,
             severity: "error",
             title: mode === "security"
               ? "Falló la actualización de seguridad del SO"
               : "Falló la actualización general del SO",
-            message: error ?? "La actualización terminó correctamente.",
+            message: error ?? (authorizationFailure
+              ? "El marco no pudo obtener una autorización válida para el mantenimiento."
+              : "La actualización terminó correctamente."),
             dedupeKey: `system-maintenance-${mode}-failed`,
-            details: { mode, status, packagesChanged, packagesPending, rebootRequired, campaignId, deviceEventId: id },
+            details: { mode, status, packagesChanged, packagesPending, rebootRequired, campaignId, attemptId, errorCode, deviceEventId: id },
           }));
           if (status === "succeeded") {
             transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
@@ -2895,6 +2960,7 @@ function isUuid(value: string): boolean {
 export function monthlyGeneralSchedule(now: Date): {
   period: string;
   scheduledAt: Date;
+  expiresAt: Date;
 } {
   // America/Lima no usa horario de verano. Se calcula en UTC-05 para que el
   // primer domingo a las 00:30 sea estable aunque el servidor use otra zona.
@@ -2903,9 +2969,11 @@ export function monthlyGeneralSchedule(now: Date): {
   const month = lima.getUTCMonth();
   const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
   const firstSunday = 1 + ((7 - firstDow) % 7);
+  const scheduledAt = new Date(Date.UTC(year, month, firstSunday, 5, 30));
   return {
     period: `${year}-${String(month + 1).padStart(2, "0")}`,
-    scheduledAt: new Date(Date.UTC(year, month, firstSunday, 5, 30)),
+    scheduledAt,
+    expiresAt: new Date(scheduledAt.getTime() + 7 * 24 * 60 * 60_000),
   };
 }
 

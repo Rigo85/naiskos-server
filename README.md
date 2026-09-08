@@ -38,10 +38,13 @@ los administradores por Telegram. `/marcos`, `/marco <nombre-o-ID>` y
 `/alertas` permiten consultar la flota sin una web administrativa.
 
 El mismo monitor crea una campaña general del SO el primer domingo de cada mes
-a las 00:30 de `America/Lima`. Las asignaciones avanzan por piloto, 10 % y
-resto después de 60 minutos de salud. `/sistema` muestra las campañas y permite
-pausar, reanudar o cancelar. Los marcos reciben sólo un permiso cerrado para su
-propia asignación; el central nunca envía shell ni credenciales administrativas.
+a las 00:30 de `America/Lima`. Cada campaña caduca, y cada asignación posee un
+`attemptId` que impide aceptar reportes atrasados de otro intento. Las
+asignaciones avanzan por piloto, 10 % y resto después de 60 minutos de salud;
+los intentos sin resultado final vencen y el umbral de fallos pausa la
+expansión. `/sistema` muestra fecha de caducidad y permite pausar, reanudar o
+cancelar. Los marcos reciben sólo un permiso cerrado para su propia asignación;
+el central nunca envía shell ni credenciales administrativas.
 
 ## Requisitos
 
@@ -118,7 +121,9 @@ agrupan así:
 | Telemetría | minutos para declarar offline y días de retención histórica |
 
 Las migraciones incluyen `015_system_update_campaigns.sql`, que mantiene el
-estado de las campañas del SO separado del catálogo de releases Naiskos.
+estado de las campañas del SO separado del catálogo de releases Naiskos, y
+`017_system_update_maintenance_v2.sql`, que añade caducidad, identidad de
+intento y los estados de reinicio y verificación.
 
 Los valores `CHANGE_ME`, `example.com` y las credenciales vacías del ejemplo
 no son válidos para producción. El token de bootstrap, el token del bot, el

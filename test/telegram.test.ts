@@ -379,6 +379,7 @@ describe("entrada de Telegram", () => {
       installed: 0,
       failed: 0,
       scheduledAt: new Date("2026-09-06T05:30:00.000Z"),
+      expiresAt: new Date("2026-09-13T05:30:00.000Z"),
     }];
     const telegram = new StubTelegram();
     const handler = new TelegramHandler(telegramConfig, repository, telegram);

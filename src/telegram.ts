@@ -933,7 +933,7 @@ function systemUpdateCampaignPresentation(campaign: SystemUpdateCampaignSummary)
         ]]
       : undefined;
   return {
-    text: `SO ${campaign.period}\nEstado: ${campaign.status} · etapa: ${campaign.activeStage}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
+    text: `SO ${campaign.period}\nEstado: ${campaign.status} · etapa: ${campaign.activeStage}\nVence: ${campaign.expiresAt.toISOString()}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
     ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
   };
 }
