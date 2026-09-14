@@ -147,6 +147,8 @@ export async function createVideoRenditions(
     "-v",
     "error",
     "-y",
+    "-fflags",
+    "+genpts",
     "-i",
     input,
     "-map",
@@ -179,11 +181,16 @@ export async function createVideoRenditions(
     "rotate=0",
     "-movflags",
     "+faststart",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-video_track_timescale",
+    "90000",
     display,
   ]);
 
   const normalized = await inspectVideo(display);
   validateNormalizedVideo(source, normalized);
+  await verifyDecodedVideo(display);
 
   const posterTimestampSeconds = Math.min(1, source.durationSeconds / 2);
   await execFileAsync("ffmpeg", [
@@ -225,6 +232,8 @@ export async function createRotatedVideoRenditions(
     "-v",
     "error",
     "-y",
+    "-fflags",
+    "+genpts",
     "-i",
     normalizedInput,
     "-map",
@@ -257,11 +266,16 @@ export async function createRotatedVideoRenditions(
     "rotate=0",
     "-movflags",
     "+faststart",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-video_track_timescale",
+    "90000",
     display,
   ]);
 
   const normalized = await inspectVideo(display);
   validateNormalizedVideo(source, normalized);
+  await verifyDecodedVideo(display);
   const posterTimestampSeconds = Math.min(1, source.durationSeconds / 2);
   await execFileAsync("ffmpeg", [
     "-v",
@@ -278,6 +292,31 @@ export async function createRotatedVideoRenditions(
     poster,
   ]);
   return { source, display: normalized, posterTimestampSeconds };
+}
+
+export async function verifyDecodedVideo(file: string): Promise<void> {
+  try {
+    await execFileAsync("ffmpeg", [
+      "-v",
+      "error",
+      "-xerror",
+      "-err_detect",
+      "explode",
+      "-i",
+      file,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a:0?",
+      "-f",
+      "null",
+      "-",
+    ]);
+  } catch (error) {
+    throw new RejectedVideoError(
+      `La variante normalizada no se puede decodificar de principio a fin: ${errorMessage(error)}`,
+    );
+  }
 }
 
 function validateNormalizedVideo(source: VideoProbe, output: VideoProbe): void {

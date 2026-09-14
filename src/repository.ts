@@ -8,7 +8,7 @@ import {
   resolveFrameNotification,
   upsertFrameNotification,
 } from "./notifications.js";
-import { FullTelemetry, HeartbeatTelemetry } from "./telemetry.js";
+import { clockAlertState, FullTelemetry, HeartbeatTelemetry } from "./telemetry.js";
 import { queueTelegramMediaNotice } from "./telegram-media-notifications.js";
 
 export interface AuthenticatedFrame {
@@ -2137,8 +2137,7 @@ export class Repository {
           details: telemetry.audio,
         },
         {
-          active: !telemetry.clock.synchronized,
-          recover: telemetry.clock.synchronized,
+          ...clockAlertState(telemetry.clock.synchronized, telemetry.uptimeSeconds),
           kind: "system.clock",
           severity: "warning" as const,
           title: "Reloj no sincronizado",
@@ -2459,6 +2458,45 @@ export class Repository {
               } satisfies RotateMediaJobPayload),
             ],
           );
+        } else if (
+          kind === "viewer.playback.skipped" ||
+          kind === "viewer.playback.recovered" ||
+          kind === "viewer.media.integrity"
+        ) {
+          const mediaId = String(event.mediaId ?? "");
+          const result = String(event.result ?? "");
+          if (!isUuid(mediaId)) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, {
+              deviceEventId: id,
+              reason: "invalid-media-id",
+            });
+            continue;
+          }
+          if (frameName === null) {
+            const frame = await client.query<{ name: string }>(
+              "SELECT name FROM naiskos.frames WHERE id=$1",
+              [frameId],
+            );
+            frameName = frame.rows[0]?.name ?? frameId;
+          }
+          const integrityFailed = kind === "viewer.media.integrity" && result === "failed";
+          const recovered = kind === "viewer.playback.recovered";
+          transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+            active: kind === "viewer.playback.skipped" || integrityFailed,
+            recover: recovered,
+            kind: "media.playback",
+            severity: integrityFailed ? "error" : "warning",
+            title: integrityFailed
+              ? "No se pudo reparar un medio local"
+              : "Un video fue omitido durante la reproducción",
+            message: integrityFailed
+              ? "La verificación local falló y el medio no pudo descargarse nuevamente."
+              : recovered
+                ? "El video volvió a progresar después de la recuperación automática."
+                : `Naiskos omitió el video tras agotar su recuperación (${String(event.reason ?? "sin detalle").slice(0, 120)}).`,
+            dedupeKey: `media-playback-${mediaId}`,
+            details: { mediaId, result: result || null, deviceEventId: id },
+          }));
         } else if (kind === "notification.read" || kind === "notification.dismissed") {
           const notificationId = String(event.notificationId ?? "");
           if (!isUuid(notificationId)) {

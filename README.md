@@ -22,6 +22,8 @@ La telemetría acepta agentes anteriores durante la actualización gradual. El
 contrato nuevo separa heartbeat ligero y muestra completa: conserva último
 contacto, temperatura y firmware, memoria/swap, capacidad y data de Naiskos,
 estado de servicios y sincronización, versiones, pantalla, audio y reloj. El
+estado opcional del visor permite distinguir agente vivo, interfaz viva y
+reproductor detenido durante una actualización gradual. El
 último estado queda en `frame_runtime`; las muestras completas se retienen 30
 días por defecto en `frame_telemetry_samples`.
 
@@ -197,7 +199,13 @@ Videos:
 - MP4/H.264, `yuv420p`, dimensiones pares y `faststart`;
 - AAC estéreo a 48 kHz;
 - póster JPEG coherente;
-- reinspección de la salida antes de publicarla.
+- generación explícita de timestamps, inicio temporal no negativo y escala de
+  tiempo estable del track MP4;
+- reinspección y decodificación completa de video y audio antes de publicarla.
+
+Las omisiones de reproducción y los resultados de integridad llegan como
+eventos idempotentes. El servidor conserva su traza, abre una alerta por medio
+y la resuelve cuando el visor confirma progreso después de recuperarse.
 
 Rotar crea una variante absoluta desde el maestro normalizado. Eliminar afecta
 sólo la relación con el marco solicitante y conserva la retención configurada.

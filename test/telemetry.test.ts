@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseFullTelemetry, parseHeartbeat } from "../src/telemetry.js";
+import { clockAlertState, parseFullTelemetry, parseHeartbeat } from "../src/telemetry.js";
 
 const frameId = "11111111-1111-4111-8111-111111111111";
 
@@ -19,6 +19,13 @@ const full = {
   display: { connected: true, connector: "HDMI-A-1", width: 1280, height: 800, power: "on" },
   audio: { available: true, transport: "hdmi" },
   clock: { synchronized: true, timezone: "America/Lima" },
+  viewer: {
+    connected: true,
+    lastHeartbeatAt: "2026-08-31T23:55:00.000Z",
+    heartbeatAgeSeconds: 3,
+    restartsRequested: 0,
+    playback: { mediaId: "video-1", state: "playing" },
+  },
 };
 
 describe("contrato de telemetría", () => {
@@ -39,5 +46,11 @@ describe("contrato de telemetría", () => {
   it("rechaza otro marco y porcentajes imposibles", () => {
     expect(parseFullTelemetry({ ...full, frameId: crypto.randomUUID() }, frameId)).toBeNull();
     expect(parseFullTelemetry({ ...full, storage: { ...full.storage, usedPercent: 101 } }, frameId)).toBeNull();
+  });
+
+  it("da cinco minutos de gracia al reloj después de arrancar", () => {
+    expect(clockAlertState(false, 299)).toEqual({ active: false, recover: false });
+    expect(clockAlertState(false, 300)).toEqual({ active: true, recover: false });
+    expect(clockAlertState(true, 1)).toEqual({ active: false, recover: true });
   });
 });

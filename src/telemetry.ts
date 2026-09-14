@@ -70,6 +70,13 @@ export interface FullTelemetry {
   };
   audio: { available: boolean; transport: "hdmi" | "analog" | "usb" | "unknown" };
   clock: { synchronized: boolean; timezone: string };
+  viewer?: {
+    connected: boolean;
+    lastHeartbeatAt: string | null;
+    heartbeatAgeSeconds: number | null;
+    restartsRequested: number;
+    playback: Record<string, unknown> | null;
+  };
 }
 
 export interface LegacyTelemetry {
@@ -113,6 +120,7 @@ export function parseFullTelemetry(input: unknown, frameId: string): FullTelemet
   const display = record(value?.display);
   const audio = record(value?.audio);
   const clock = record(value?.clock);
+  const viewer = value?.viewer === undefined ? undefined : record(value.viewer);
   if (
     value?.schemaVersion !== 1 || value.kind !== "full" || value.frameId !== frameId ||
     !dateTime(value.observedAt) || !nonnegativeInteger(value.uptimeSeconds) ||
@@ -129,9 +137,20 @@ export function parseFullTelemetry(input: unknown, frameId: string): FullTelemet
     !nonnegativeInteger(display.width) || !nonnegativeInteger(display.height) ||
     !["on", "off", "unknown"].includes(String(display.power)) ||
     typeof audio?.available !== "boolean" || !["hdmi", "analog", "usb", "unknown"].includes(String(audio.transport)) ||
-    typeof clock?.synchronized !== "boolean" || !shortString(clock.timezone, 80)
+    typeof clock?.synchronized !== "boolean" || !shortString(clock.timezone, 80) ||
+    (viewer !== undefined && !viewerTelemetry(viewer))
   ) return null;
   return value as unknown as FullTelemetry;
+}
+
+export function clockAlertState(
+  synchronized: boolean,
+  uptimeSeconds: number,
+): { active: boolean; recover: boolean } {
+  return {
+    active: !synchronized && uptimeSeconds >= 300,
+    recover: synchronized,
+  };
 }
 
 export function parseLegacyTelemetry(input: unknown): LegacyTelemetry | null {
@@ -184,6 +203,17 @@ function storageUsage(value: Record<string, unknown> | null): boolean {
 }
 function service(value: unknown): boolean {
   return typeof value === "string" && SERVICE_STATES.has(value);
+}
+function viewerTelemetry(value: Record<string, unknown> | null): boolean {
+  if (!value) return false;
+  const playback = value.playback === null ? null : record(value.playback);
+  return (
+    typeof value.connected === "boolean" &&
+    nullableDateTime(value.lastHeartbeatAt) &&
+    (value.heartbeatAgeSeconds === null || nonnegativeInteger(value.heartbeatAgeSeconds)) &&
+    nonnegativeInteger(value.restartsRequested) &&
+    (value.playback === null || Boolean(playback))
+  );
 }
 function shortStrings(value: Record<string, unknown> | null, keys: string[], length: number): boolean {
   return Boolean(value && keys.every((key) => shortString(value[key], length)));
