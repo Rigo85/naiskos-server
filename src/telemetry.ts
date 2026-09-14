@@ -77,6 +77,15 @@ export interface FullTelemetry {
     restartsRequested: number;
     playback: Record<string, unknown> | null;
   };
+  repose?: {
+    schemaVersion: 1;
+    active: boolean;
+    source: "manual" | "schedule" | null;
+    enteredAt: string | null;
+    updatedAt: string;
+    overrideUntil: string | null;
+    schedule: { from: string; until: string };
+  } | null;
 }
 
 export interface LegacyTelemetry {
@@ -121,6 +130,8 @@ export function parseFullTelemetry(input: unknown, frameId: string): FullTelemet
   const audio = record(value?.audio);
   const clock = record(value?.clock);
   const viewer = value?.viewer === undefined ? undefined : record(value.viewer);
+  const repose = value?.repose === undefined || value.repose === null
+    ? value?.repose : record(value.repose);
   if (
     value?.schemaVersion !== 1 || value.kind !== "full" || value.frameId !== frameId ||
     !dateTime(value.observedAt) || !nonnegativeInteger(value.uptimeSeconds) ||
@@ -138,7 +149,8 @@ export function parseFullTelemetry(input: unknown, frameId: string): FullTelemet
     !["on", "off", "unknown"].includes(String(display.power)) ||
     typeof audio?.available !== "boolean" || !["hdmi", "analog", "usb", "unknown"].includes(String(audio.transport)) ||
     typeof clock?.synchronized !== "boolean" || !shortString(clock.timezone, 80) ||
-    (viewer !== undefined && !viewerTelemetry(viewer))
+    (viewer !== undefined && !viewerTelemetry(viewer)) ||
+    (repose !== undefined && repose !== null && !reposeTelemetry(repose))
   ) return null;
   return value as unknown as FullTelemetry;
 }
@@ -213,6 +225,20 @@ function viewerTelemetry(value: Record<string, unknown> | null): boolean {
     (value.heartbeatAgeSeconds === null || nonnegativeInteger(value.heartbeatAgeSeconds)) &&
     nonnegativeInteger(value.restartsRequested) &&
     (value.playback === null || Boolean(playback))
+  );
+}
+function reposeTelemetry(value: Record<string, unknown>): boolean {
+  const schedule = record(value.schedule);
+  return (
+    value.schemaVersion === 1 &&
+    typeof value.active === "boolean" &&
+    (value.source === null || value.source === "manual" || value.source === "schedule") &&
+    nullableDateTime(value.enteredAt) &&
+    dateTime(value.updatedAt) &&
+    nullableDateTime(value.overrideUntil) &&
+    Boolean(schedule) &&
+    /^([01]\d|2[0-3]):[0-5]\d$/.test(String(schedule?.from)) &&
+    /^([01]\d|2[0-3]):[0-5]\d$/.test(String(schedule?.until))
   );
 }
 function shortStrings(value: Record<string, unknown> | null, keys: string[], length: number): boolean {

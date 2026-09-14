@@ -26,6 +26,15 @@ const full = {
     restartsRequested: 0,
     playback: { mediaId: "video-1", state: "playing" },
   },
+  repose: {
+    schemaVersion: 1,
+    active: true,
+    source: "schedule",
+    enteredAt: "2026-08-31T23:30:00.000Z",
+    updatedAt: "2026-08-31T23:30:00.000Z",
+    overrideUntil: null,
+    schedule: { from: "23:30", until: "07:00" },
+  },
 };
 
 describe("contrato de telemetría", () => {
@@ -46,6 +55,7 @@ describe("contrato de telemetría", () => {
   it("rechaza otro marco y porcentajes imposibles", () => {
     expect(parseFullTelemetry({ ...full, frameId: crypto.randomUUID() }, frameId)).toBeNull();
     expect(parseFullTelemetry({ ...full, storage: { ...full.storage, usedPercent: 101 } }, frameId)).toBeNull();
+    expect(parseFullTelemetry({ ...full, repose: { ...full.repose, schedule: { from: "25:00", until: "07:00" } } }, frameId)).toBeNull();
   });
 
   it("da cinco minutos de gracia al reloj después de arrancar", () => {
