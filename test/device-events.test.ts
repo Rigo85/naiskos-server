@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
-import { Repository } from "../src/repository.js";
+import { Repository, playbackEventAtEffectiveEnd } from "../src/repository.js";
 
 class FakeClient {
   readonly statements: Array<{ sql: string; values?: unknown[] }> = [];
@@ -142,6 +142,61 @@ describe("eventos del dispositivo", () => {
     expect(notificationUpdates[0]?.values).toEqual([notificationId, frameId]);
     expect(notificationUpdates[1]?.sql).toContain("dismissed_at=COALESCE");
     expect(notificationUpdates[1]?.sql.match(/read_at=/g)).toHaveLength(1);
+  });
+
+  it("resuelve la alerta si Chromium omitió un video que ya estaba al final", async () => {
+    class PlaybackClient extends FakeClient {
+      override async query(sql: string, values?: unknown[]) {
+        this.statements.push({ sql, values });
+        if (sql.includes("SELECT name FROM naiskos.frames")) {
+          return { rows: [{ name: "Piloto" }], rowCount: 1 };
+        }
+        if (sql.includes("SELECT resolved_at IS NULL AS active")) {
+          return { rows: [{ active: true }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }
+    }
+    const client = new PlaybackClient();
+    const repository = new Repository({ connect: async () => client } as unknown as Pool);
+    const frameId = "11111111-1111-4111-8111-111111111111";
+    const mediaId = "b210a8b6-1a17-4759-af25-2cf1fca0c057";
+    const transitions: import("../src/repository.js").TelemetryAlertTransition[] = [];
+
+    await repository.applyDeviceEvents(
+      frameId,
+      [{
+        id: "c210a8b6-1a17-4759-af25-2cf1fca0c058",
+        type: "viewer.playback.skipped",
+        mediaId,
+        currentTime: 13.941667,
+        duration: 13.941667,
+        ended: false,
+        reason: "playback-stalled",
+      }],
+      transitions,
+    );
+
+    expect(playbackEventAtEffectiveEnd({ currentTime: 13.9, duration: 13.941667 })).toBe(true);
+    expect(playbackEventAtEffectiveEnd({ currentTime: 9, duration: 13.941667 })).toBe(false);
+    expect(transitions).toMatchObject([{
+      status: "resolved",
+      kind: "media.playback",
+      title: "Final de video reconocido",
+    }]);
+    expect(
+      client.statements.some(({ sql }) =>
+        sql.includes("UPDATE naiskos.frame_notifications") &&
+        sql.includes("resolved_at=COALESCE(resolved_at, now())"),
+      ),
+    ).toBe(true);
+    expect(
+      client.statements.some(
+        ({ sql, values }) =>
+          sql.includes("INSERT INTO naiskos.audit_log") &&
+          values?.[2] === "media.playback.effective-end",
+      ),
+    ).toBe(true);
   });
 
   it("abre y recupera alertas del horario de pantalla", async () => {

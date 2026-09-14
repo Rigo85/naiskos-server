@@ -2480,17 +2480,31 @@ export class Repository {
             frameName = frame.rows[0]?.name ?? frameId;
           }
           const integrityFailed = kind === "viewer.media.integrity" && result === "failed";
-          const recovered = kind === "viewer.playback.recovered";
+          const effectiveEnd =
+            kind === "viewer.playback.skipped" && playbackEventAtEffectiveEnd(event);
+          const recovered = kind === "viewer.playback.recovered" || effectiveEnd;
+          if (effectiveEnd) {
+            await this.audit(client, "media.playback.effective-end", frameId, null, {
+              mediaId,
+              deviceEventId: id,
+              currentTime: event.currentTime ?? null,
+              duration: event.duration ?? null,
+            });
+          }
           transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
-            active: kind === "viewer.playback.skipped" || integrityFailed,
+            active: (kind === "viewer.playback.skipped" && !effectiveEnd) || integrityFailed,
             recover: recovered,
             kind: "media.playback",
             severity: integrityFailed ? "error" : "warning",
             title: integrityFailed
               ? "No se pudo reparar un medio local"
+              : effectiveEnd
+                ? "Final de video reconocido"
               : "Un video fue omitido durante la reproducción",
             message: integrityFailed
               ? "La verificación local falló y el medio no pudo descargarse nuevamente."
+              : effectiveEnd
+                ? "El video ya había alcanzado su final efectivo; no existía un fallo del archivo."
               : recovered
                 ? "El video volvió a progresar después de la recuperación automática."
                 : `Naiskos omitió el video tras agotar su recuperación (${String(event.reason ?? "sin detalle").slice(0, 120)}).`,
@@ -2992,6 +3006,20 @@ function stableRank(id: string, version: number): number {
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
+  );
+}
+
+const PLAYBACK_END_EPSILON_SECONDS = 0.1;
+
+export function playbackEventAtEffectiveEnd(event: Record<string, unknown>): boolean {
+  if (event.ended === true) return true;
+  const duration = Number(event.duration);
+  const currentTime = Number(event.currentTime);
+  return (
+    Number.isFinite(duration) &&
+    duration > 0 &&
+    Number.isFinite(currentTime) &&
+    currentTime >= Math.max(0, duration - PLAYBACK_END_EPSILON_SECONDS)
   );
 }
 
