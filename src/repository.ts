@@ -2459,6 +2459,7 @@ export class Repository {
             ],
           );
         } else if (
+          kind === "viewer.media.preparation-failed" ||
           kind === "viewer.playback.skipped" ||
           kind === "viewer.playback.recovered" ||
           kind === "viewer.media.integrity"
@@ -2480,9 +2481,11 @@ export class Repository {
             frameName = frame.rows[0]?.name ?? frameId;
           }
           const integrityFailed = kind === "viewer.media.integrity" && result === "failed";
+          const integrityRecovered =
+            kind === "viewer.media.integrity" && (result === "valid" || result === "repaired");
           const effectiveEnd =
             kind === "viewer.playback.skipped" && playbackEventAtEffectiveEnd(event);
-          const recovered = kind === "viewer.playback.recovered" || effectiveEnd;
+          const recovered = kind === "viewer.playback.recovered" || effectiveEnd || integrityRecovered;
           if (effectiveEnd) {
             await this.audit(client, "media.playback.effective-end", frameId, null, {
               mediaId,
@@ -2492,17 +2495,24 @@ export class Repository {
             });
           }
           transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
-            active: (kind === "viewer.playback.skipped" && !effectiveEnd) || integrityFailed,
+            active:
+              kind === "viewer.media.preparation-failed" ||
+              (kind === "viewer.playback.skipped" && !effectiveEnd) ||
+              integrityFailed,
             recover: recovered,
             kind: "media.playback",
             severity: integrityFailed ? "error" : "warning",
             title: integrityFailed
               ? "No se pudo reparar un medio local"
+              : kind === "viewer.media.preparation-failed"
+                ? "Un medio no pudo prepararse para mostrarlo"
               : effectiveEnd
                 ? "Final de video reconocido"
               : "Un video fue omitido durante la reproducción",
             message: integrityFailed
               ? "La verificación local falló y el medio no pudo descargarse nuevamente."
+              : kind === "viewer.media.preparation-failed"
+                ? `Naiskos conservó el contenido anterior y continuó con el siguiente medio (${String(event.reason ?? "sin detalle").slice(0, 120)}).`
               : effectiveEnd
                 ? "El video ya había alcanzado su final efectivo; no existía un fallo del archivo."
               : recovered

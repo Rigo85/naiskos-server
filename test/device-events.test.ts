@@ -199,6 +199,49 @@ describe("eventos del dispositivo", () => {
     ).toBe(true);
   });
 
+  it("abre una alerta deduplicada cuando cualquier medio falla antes de mostrarse", async () => {
+    class PreparationClient extends FakeClient {
+      override async query(sql: string, values?: unknown[]) {
+        this.statements.push({ sql, values });
+        if (sql.includes("SELECT name FROM naiskos.frames")) {
+          return { rows: [{ name: "Piloto" }], rowCount: 1 };
+        }
+        if (sql.includes("SELECT resolved_at IS NULL AS active")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (sql.includes("INSERT INTO naiskos.frame_notifications")) {
+          return { rows: [{ id: "e210a8b6-1a17-4759-af25-2cf1fca0c060" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }
+    }
+    const client = new PreparationClient();
+    const repository = new Repository({ connect: async () => client } as unknown as Pool);
+    const transitions: import("../src/repository.js").TelemetryAlertTransition[] = [];
+    const mediaId = "b210a8b6-1a17-4759-af25-2cf1fca0c057";
+
+    await repository.applyDeviceEvents(
+      "11111111-1111-4111-8111-111111111111",
+      [{
+        id: "c210a8b6-1a17-4759-af25-2cf1fca0c058",
+        type: "viewer.media.preparation-failed",
+        mediaId,
+        reason: "Tiempo de preparación agotado.",
+      }],
+      transitions,
+    );
+
+    expect(transitions).toMatchObject([{
+      status: "opened",
+      kind: "media.playback",
+      title: "Un medio no pudo prepararse para mostrarlo",
+    }]);
+    const notification = client.statements.find(({ sql }) =>
+      sql.includes("INSERT INTO naiskos.frame_notifications"),
+    );
+    expect(notification?.values?.[5]).toBe(`media-playback-${mediaId}`);
+  });
+
   it("abre y recupera alertas del horario de pantalla", async () => {
     class DisplayClient extends FakeClient {
       override async query(sql: string, values?: unknown[]) {
