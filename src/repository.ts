@@ -2473,6 +2473,14 @@ export class Repository {
             });
             continue;
           }
+          if (kind === "viewer.media.preparation-failed") {
+            await this.audit(client, kind, frameId, null, {
+              deviceEventId: id,
+              mediaId,
+              reason: String(event.reason ?? "sin detalle").slice(0, 120),
+            });
+            continue;
+          }
           if (frameName === null) {
             const frame = await client.query<{ name: string }>(
               "SELECT name FROM naiskos.frames WHERE id=$1",
@@ -2496,7 +2504,6 @@ export class Repository {
           }
           transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
             active:
-              kind === "viewer.media.preparation-failed" ||
               (kind === "viewer.playback.skipped" && !effectiveEnd) ||
               integrityFailed,
             recover: recovered,
@@ -2504,15 +2511,11 @@ export class Repository {
             severity: integrityFailed ? "error" : "warning",
             title: integrityFailed
               ? "No se pudo reparar un medio local"
-              : kind === "viewer.media.preparation-failed"
-                ? "Un medio no pudo prepararse para mostrarlo"
               : effectiveEnd
                 ? "Final de video reconocido"
               : "Un video fue omitido durante la reproducción",
             message: integrityFailed
               ? "La verificación local falló y el medio no pudo descargarse nuevamente."
-              : kind === "viewer.media.preparation-failed"
-                ? `Naiskos conservó el contenido anterior y continuó con el siguiente medio (${String(event.reason ?? "sin detalle").slice(0, 120)}).`
               : effectiveEnd
                 ? "El video ya había alcanzado su final efectivo; no existía un fallo del archivo."
               : recovered

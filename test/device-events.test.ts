@@ -199,7 +199,7 @@ describe("eventos del dispositivo", () => {
     ).toBe(true);
   });
 
-  it("abre una alerta deduplicada cuando cualquier medio falla antes de mostrarse", async () => {
+  it("audita un fallo de preparación sin abrir una alerta si el visor pudo continuar", async () => {
     class PreparationClient extends FakeClient {
       override async query(sql: string, values?: unknown[]) {
         this.statements.push({ sql, values });
@@ -231,15 +231,35 @@ describe("eventos del dispositivo", () => {
       transitions,
     );
 
+    expect(transitions).toEqual([]);
+    expect(
+      client.statements.some(({ sql }) =>
+        sql.includes("INSERT INTO naiskos.frame_notifications"),
+      ),
+    ).toBe(false);
+    expect(
+      client.statements.some(
+        ({ sql, values }) =>
+          sql.includes("INSERT INTO naiskos.audit_log") &&
+          values?.[2] === "viewer.media.preparation-failed",
+      ),
+    ).toBe(true);
+
+    await repository.applyDeviceEvents(
+      "11111111-1111-4111-8111-111111111111",
+      [{
+        id: "c210a8b6-1a17-4759-af25-2cf1fca0c059",
+        type: "viewer.media.integrity",
+        mediaId,
+        result: "failed",
+      }],
+      transitions,
+    );
     expect(transitions).toMatchObject([{
       status: "opened",
       kind: "media.playback",
-      title: "Un medio no pudo prepararse para mostrarlo",
+      title: "No se pudo reparar un medio local",
     }]);
-    const notification = client.statements.find(({ sql }) =>
-      sql.includes("INSERT INTO naiskos.frame_notifications"),
-    );
-    expect(notification?.values?.[5]).toBe(`media-playback-${mediaId}`);
   });
 
   it("abre y recupera alertas del horario de pantalla", async () => {
