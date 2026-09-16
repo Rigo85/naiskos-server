@@ -3,6 +3,7 @@ import { loadConfig } from "./config.js";
 import { createDatabase } from "./db.js";
 import { Repository } from "./repository.js";
 import { TelegramClient } from "./telegram.js";
+import { ReleaseFeedback } from './release-feedback.js';
 
 const config = loadConfig();
 const database = createDatabase(config);
@@ -12,22 +13,14 @@ await app.listen({ host: config.host, port: config.port });
 
 const fleetRepository = new Repository(database);
 const telegram = new TelegramClient(config);
+const releaseFeedback = new ReleaseFeedback(database,telegram,config.telegramAdminIds);
 let monitorRunning = false;
 async function monitorFleet(): Promise<void> {
   if (monitorRunning) return;
   monitorRunning = true;
   try {
-    const expiredReleases = await fleetRepository.expireReleaseCampaigns();
-    if (expiredReleases.length) {
-      await Promise.allSettled([...config.telegramAdminIds].flatMap((adminId) =>
-        expiredReleases.map((change) =>
-          telegram.sendMessage(
-            adminId,
-            `⌛ Campaña Naiskos vencida.\nRelease: ${change.releaseId}\nCampaña: ${change.campaignId}`,
-          ),
-        ),
-      ));
-    }
+    // Expiry notifications now use the same transactional delivery queue.
+    await fleetRepository.expireReleaseCampaigns();
     const monthlyCampaign = await fleetRepository.ensureMonthlySystemUpdateCampaign();
     if (monthlyCampaign) {
       await Promise.allSettled([...config.telegramAdminIds].map((adminId) =>
@@ -70,9 +63,21 @@ const telemetryPruneTimer = setInterval(() => {
 }, 24 * 60 * 60_000);
 telemetryPruneTimer.unref();
 void monitorFleet();
+let feedbackRunning=false;
+async function refreshReleaseFeedback():Promise<void> {
+  if(feedbackRunning) return;
+  feedbackRunning=true;
+  try { await releaseFeedback.runOnce(); }
+  catch(error) { app.log.error({err:error},'Falló entrega de feedback de releases; se reintentará'); }
+  finally { feedbackRunning=false; }
+}
+const feedbackTimer=setInterval(()=>void refreshReleaseFeedback(),30_000);
+feedbackTimer.unref();
+void refreshReleaseFeedback();
 
 async function shutdown(signal: string): Promise<void> {
   clearInterval(fleetMonitorTimer);
+  clearInterval(feedbackTimer);
   clearInterval(telemetryPruneTimer);
   app.log.info({ signal }, "Deteniendo Naiskos API");
   await app.close();

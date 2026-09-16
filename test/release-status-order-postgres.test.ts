@@ -33,6 +33,8 @@ describe.skipIf(!db)('orden de resultados de releases', () => {
       const notices = await db.query(`SELECT count(*)::int AS n FROM naiskos.frame_notifications
         WHERE frame_id=$1 AND kind='software.release'`, [frame.frameId]);
       expect(notices.rows[0].n).toBe(1);
+      const feedback=await db.query(`SELECT details->>'status' AS status FROM naiskos.release_feedback_events WHERE campaign_id=$1`,[campaignId]);
+      expect(feedback.rows.map(row=>row.status)).toEqual(['completed']);
     } finally {
       await db.query("DELETE FROM naiskos.audit_log WHERE frame_id=$1 OR details->>'campaignId'=$2", [frame.frameId, campaignId]);
       await db.query('DELETE FROM naiskos.release_campaigns WHERE id=$1', [campaignId]);

@@ -1,4 +1,6 @@
 import path from "node:path";
+import { releaseCampaignPresentation } from './release-presentation.js';
+import type { ReleaseFeedback } from './release-feedback.js';
 
 import { ServerConfig } from "./config.js";
 import {
@@ -259,6 +261,7 @@ export class TelegramHandler {
     private readonly config: ServerConfig,
     private readonly repository: TelegramRepository,
     private readonly telegram: TelegramTransport,
+    private readonly releaseFeedback?: Pick<ReleaseFeedback,'show'>,
   ) {}
 
   async handle(update: TelegramUpdate): Promise<void> {
@@ -521,8 +524,14 @@ export class TelegramHandler {
       );
       await this.telegram.answerCallbackQuery(
         query.id,
-        changed ? "Campaña actualizada." : "La campaña ya cambió o la transición no es válida.",
+        changed ? (transition === 'cancel'
+          ? 'Cancelada: no desinstala lo aplicado ni detiene una operación iniciada.'
+          : 'Campaña actualizada.') : "La campaña ya cambió o la transición no es válida.",
       );
+      if (this.releaseFeedback && query.message) {
+        await this.releaseFeedback.show(query.message.chat.id,targetId,query.message.message_id);
+        return;
+      }
       const campaign = (await this.repository.listReleaseCampaigns()).find(
         (candidate) => candidate.id === targetId,
       );
@@ -848,6 +857,10 @@ export class TelegramHandler {
       return;
     }
     for (const campaign of campaigns.slice(0, 10)) {
+      if (this.releaseFeedback) {
+        await this.releaseFeedback.show(chatId,campaign.id);
+        continue;
+      }
       const presentation = releaseCampaignPresentation(campaign);
       await this.telegram.sendMessage(
         chatId,
@@ -889,32 +902,6 @@ export class TelegramHandler {
     }
     return false;
   }
-}
-
-function releaseCampaignPresentation(campaign: ReleaseCampaignSummary): {
-  text: string;
-  replyMarkup?: object;
-} {
-  const buttons = campaign.status === "draft"
-    ? [[
-        { text: "Aprobar campaña", callback_data: `release-approve:${campaign.id}` },
-        { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-      ]]
-    : campaign.status === "approved"
-      ? [[
-          { text: "Pausar", callback_data: `release-pause:${campaign.id}` },
-          { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-        ]]
-      : campaign.status === "paused"
-        ? [[
-            { text: "Reanudar", callback_data: `release-approve:${campaign.id}` },
-            { text: "Cancelar", callback_data: `release-cancel:${campaign.id}` },
-          ]]
-        : undefined;
-  return {
-    text: `${campaign.releaseId}\nEstado: ${campaign.status}\nVence: ${campaign.expiresAt.toISOString()}\nMarcos: ${campaign.frames} · instalados: ${campaign.installed} · fallos: ${campaign.failed}`,
-    ...(buttons ? { replyMarkup: { inline_keyboard: buttons } } : {}),
-  };
 }
 
 function systemUpdateCampaignPresentation(campaign: SystemUpdateCampaignSummary): {

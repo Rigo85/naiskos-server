@@ -230,6 +230,11 @@ verifica hashes y sincronización y limpia sus datos al finalizar.
 
 ## Releases y campañas
 
+La migración `018_release_feedback.sql` agrega el seguimiento durable en
+Telegram: fase por marco, causas, mensaje canónico y avisos con reintentos.
+El agente con baseline 15 confirma salud durante la observación sin adelantar
+su resultado. Véase [seguimiento de releases](docs/release-feedback.md).
+
 La migración `014_software_releases.sql` agrega catálogo, campañas y
 asignaciones por marco. Un artefacto se publica sólo después de verificar su
 firma con la clave pública y comprobar tamaño y SHA-256:

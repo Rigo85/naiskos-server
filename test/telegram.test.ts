@@ -364,7 +364,7 @@ describe("entrada de Telegram", () => {
       chatId: 99,
       messageId: 700,
     });
-    expect(telegram.edits[0]?.text).toContain("Estado: approved");
+    expect(telegram.edits[0]?.text).toContain("Campaña: Autorizada");
     expect(JSON.stringify(telegram.edits[0]?.markup)).toContain("release-pause");
   });
 

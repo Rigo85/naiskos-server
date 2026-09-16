@@ -198,6 +198,10 @@ export interface ReleaseCampaignSummary {
   failed: number;
   createdAt: Date;
   expiresAt: Date;
+  timezone?: string;
+  observeMinutes?: number;
+  assignments?: Array<{ frameId: string; frameName: string; status: string;
+    error: string | null; updatedAt: string; healthConfirmed?: boolean }>;
 }
 
 export interface SystemUpdatePermit {
@@ -291,16 +295,23 @@ export class Repository {
     return result.rows[0]?.assetPath ?? null;
   }
 
-  async listReleaseCampaigns(): Promise<ReleaseCampaignSummary[]> {
-    const result = await this.database.query<ReleaseCampaignSummary>(
+  async listReleaseCampaigns(campaignId?: string, queryable: Pick<Database,'query'> = this.database): Promise<ReleaseCampaignSummary[]> {
+    const result = await queryable.query<ReleaseCampaignSummary>(
       `SELECT c.id, c.release_id AS "releaseId", c.status,
               c.created_at AS "createdAt", c.expires_at AS "expiresAt",
+              c.timezone,c.observe_minutes AS "observeMinutes",
+              COALESCE(jsonb_agg(jsonb_build_object('frameId',a.frame_id,'frameName',f.name,
+                'status',a.status,'error',a.last_error,'updatedAt',a.updated_at,'healthConfirmed',a.health_confirmed)
+                ORDER BY f.name,a.frame_id) FILTER (WHERE a.frame_id IS NOT NULL),'[]') AS assignments,
               count(a.frame_id)::integer AS frames,
               count(*) FILTER (WHERE a.status='installed')::integer AS installed,
               count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed
          FROM naiskos.release_campaigns c
          LEFT JOIN naiskos.release_assignments a ON a.campaign_id=c.id
+         LEFT JOIN naiskos.frames f ON f.id=a.frame_id
+        WHERE ($1::uuid IS NULL OR c.id=$1)
         GROUP BY c.id ORDER BY c.created_at DESC LIMIT 20`,
+      [campaignId ?? null],
     );
     return result.rows;
   }
@@ -2571,7 +2582,8 @@ export class Repository {
             `UPDATE naiskos.release_assignments a SET
                 status=$4,
                 progress_percent=CASE WHEN $4='installed' THEN 100 ELSE $5 END,
-                last_error=$6,
+                last_error=CASE WHEN $4='observing' AND (a.health_confirmed OR $7) THEN NULL ELSE $6 END,
+                health_confirmed=a.health_confirmed OR ($4='observing' AND $7),
                 downloaded_at=CASE WHEN $4 IN ('verified','awaiting_window') THEN COALESCE(downloaded_at,now()) ELSE downloaded_at END,
                 activated_at=CASE WHEN $4 IN ('observing','installed') THEN COALESCE(activated_at,now()) ELSE activated_at END,
                 observed_at=CASE WHEN $4='installed' THEN now() ELSE observed_at END,
@@ -2592,6 +2604,7 @@ export class Repository {
                 ? Number(event.progressPercent)
                 : null,
               typeof event.error === "string" ? event.error.slice(0, 1_000) : null,
+              event.healthConfirmed === true,
             ],
           );
           if (!updated.rowCount) {

@@ -14,6 +14,7 @@ import { Repository, TelemetryAlertTransition } from "./repository.js";
 import { verifyOpaqueSecret, verifyWebhookSecret } from "./security.js";
 import { TelegramClient, TelegramHandler, TelegramUpdate } from "./telegram.js";
 import { WeatherService } from "./weather.js";
+import { ReleaseFeedback } from './release-feedback.js';
 import {
   parseFullTelemetry,
   parseHeartbeat,
@@ -35,7 +36,8 @@ export async function buildApp(
   });
   const repository = new Repository(database);
   const telegram = new TelegramClient(config);
-  const telegramHandler = new TelegramHandler(config, repository, telegram);
+  const telegramHandler = new TelegramHandler(config, repository, telegram,
+    new ReleaseFeedback(database,telegram,config.telegramAdminIds));
   const geoLocator = await MaxMindGeoLocator.open(config.geoLiteDatabasePath);
   const wifiLocator = config.googleGeolocationApiKey
     ? new GoogleWifiLocationProvider(config)
