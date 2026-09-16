@@ -2578,7 +2578,11 @@ export class Repository {
                 updated_at=now()
               FROM naiskos.release_campaigns c
              WHERE a.campaign_id=$1 AND a.frame_id=$2 AND c.id=a.campaign_id
-               AND c.release_id=$3`,
+               AND c.release_id=$3
+               AND a.status NOT IN ('installed','failed','rolled_back')
+               AND ($4 IN ('failed','rolled_back') OR
+                 array_position(ARRAY['assigned','downloading','verified','awaiting_window','activating','observing','installed'], $4)
+                 >= coalesce(array_position(ARRAY['assigned','downloading','verified','awaiting_window','activating','observing','installed'], a.status), 0))`,
             [
               campaignId,
               frameId,
@@ -2593,7 +2597,7 @@ export class Repository {
           if (!updated.rowCount) {
             await this.audit(client, `${kind}.ignored`, frameId, null, {
               deviceEventId: id,
-              reason: "assignment-not-found",
+              reason: "assignment-not-found-or-stale-release-status",
               campaignId,
               releaseId,
             });
