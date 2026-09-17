@@ -13,6 +13,7 @@ import {
 import { ServerConfig } from "../src/config.js";
 import { Repository } from "../src/repository.js";
 import { MediaWorker, MediaWorkerTelegram } from "../src/worker.js";
+import { backfillMediaDimensions } from "../src/dimensions-backfill.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const photoPath = process.env.TEST_PHOTO_PATH;
@@ -183,6 +184,10 @@ describe.skipIf(!database || !photoPath || !videoPath)(
           expect(typeof photo.sizeBytes).toBe("number");
           expect(typeof video.sizeBytes).toBe("number");
           expect(typeof video.durationSeconds).toBe("number");
+          expect(Number(photo.width)).toBeGreaterThan(0);
+          expect(Number(photo.height)).toBeGreaterThan(0);
+          expect(Number(video.width)).toBeGreaterThan(0);
+          expect(Number(video.height)).toBeGreaterThan(0);
           expect(typeof video.posterSizeBytes).toBe("number");
           expect(typeof photo.thumbnailSizeBytes).toBe("number");
           expect(typeof video.thumbnailSizeBytes).toBe("number");
@@ -192,7 +197,27 @@ describe.skipIf(!database || !photoPath || !videoPath)(
           expect(String(video.thumbnailDownloadUrl)).toMatch(
             /^https:\/\/naiskos\.test\/api\/v1\/files\//,
           );
+          // Historical videos have null dimensions and cropped thumbnails.
+          // Recover actual dimensions centrally, without changing the files.
+          await database.query(
+            "UPDATE naiskos.media_variants SET width=NULL, height=NULL WHERE id=$1",
+            [video.variantId],
+          );
+          const legacy = await repository.getManifest(frame.frameId, "https://naiskos.test");
+          const legacyVideo = (legacy.media as Array<Record<string, unknown>>).find((item) => item.id === video.id)!;
+          expect(legacyVideo.width).toBeNull();
+          expect(legacyVideo.height).toBeNull();
+          expect(await backfillMediaDimensions(database, storageRoot, frame.frameId)).toMatchObject({ candidates: 1, updated: 0, applied: false });
+          expect(await backfillMediaDimensions(database, storageRoot, frame.frameId, true)).toMatchObject({ updated: 1, frames: 1 });
+          expect(await backfillMediaDimensions(database, storageRoot, frame.frameId, true)).toMatchObject({ updated: 0, frames: 0 });
+          const repaired = await repository.getManifest(frame.frameId, "https://naiskos.test");
+          expect(repaired.version).toBe(Number(manifest.version) + 1);
+          const repairedVideo = (repaired.media as Array<Record<string, unknown>>).find((item) => item.id === video.id)!;
+          expect(repairedVideo.width).toBe(video.width);
+          expect(repairedVideo.height).toBe(video.height);
+          expect(repairedVideo.sha256).toBe(video.sha256);
           const productionSettings = {
+            collageMode: "adaptive",
             photoDurationSeconds: 47,
             fadeDurationMs: 321,
             defaultFitMode: "cover",
@@ -243,6 +268,10 @@ describe.skipIf(!database || !photoPath || !videoPath)(
           );
           expect(rotated.settingsRevision).toBe(configured.settingsRevision);
           expect(rotated.settings).toEqual(productionSettings);
+          for (const item of rotated.media as Array<Record<string, unknown>>) {
+            const original = media.find((entry) => entry.id === item.id)!;
+            expect(Number(item.width) / Number(item.height)).toBeCloseTo(Number(original.height) / Number(original.width), 1);
+          }
           expect(
             (rotated.media as Array<Record<string, unknown>>).map((item) =>
               item.rotationDegrees,

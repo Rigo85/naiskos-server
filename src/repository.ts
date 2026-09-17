@@ -1448,6 +1448,7 @@ export class Repository {
     const frame = frameResult.rows[0]!;
     const mediaResult = await this.database.query<Record<string, unknown>>(
       `SELECT m.id, m.kind, v.id AS "variantId", v.extension, m.caption,
+              v.width, v.height,
               u.display_name AS "senderName",
               m.created_at AS "receivedAt", fm.fit_mode AS "fitMode",
               fm.rotation_degrees AS "rotationDegrees",

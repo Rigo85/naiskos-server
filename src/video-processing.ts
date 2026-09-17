@@ -64,7 +64,7 @@ export interface VideoProcessingResult {
 
 export class RejectedVideoError extends Error {}
 
-export async function inspectVideo(file: string): Promise<VideoProbe> {
+export async function inspectVideo(file: string, timeoutMs?: number): Promise<VideoProbe> {
   let document: ProbeDocument;
   try {
     const { stdout } = await execFileAsync("ffprobe", [
@@ -75,7 +75,7 @@ export async function inspectVideo(file: string): Promise<VideoProbe> {
       "-of",
       "json",
       file,
-    ]);
+    ], { timeout: timeoutMs });
     document = JSON.parse(stdout) as ProbeDocument;
   } catch (error) {
     throw new RejectedVideoError(

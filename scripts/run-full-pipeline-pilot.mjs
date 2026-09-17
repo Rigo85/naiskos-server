@@ -123,8 +123,8 @@ try {
     storageRoot,
     telegramToken: "pilot-token",
     telegramWebhookSecret: "pilot-webhook-secret",
-    telegramApiBase: "http://127.0.0.1:8092",
-    telegramAdminIds: new Set(["99999"]),
+    telegramApiBase: "http://127.0.0.1:1",
+    telegramAdminIds: new Set(),
     workerIntervalMs: 1_000,
     originalRetentionDays: 7,
     trashRetentionDays: 30,
@@ -159,6 +159,9 @@ try {
     frameWidth: 1280,
     frameHeight: 800,
     syncIntervalMs: 5_000,
+    weatherSyncIntervalMs: 60_000,
+    // Test-only cadence: validate receipt immediately without waiting a minute.
+    telemetryHeartbeatIntervalMs: 1,
     diskBlockPercent: 99,
   };
   const engine = new SyncEngine(agentConfig, emptyManifest(frame.frameId));
@@ -172,6 +175,9 @@ try {
     );
   }
   for (const media of manifest.media) {
+    if (!(media.width > 0 && media.height > 0)) {
+      throw new Error(`Proporciones ausentes en el manifiesto local para ${media.id}`);
+    }
     const file = path.join(agentDataRoot, media.url.replace(/^\//, ""));
     const contents = await readFile(file);
     const sha256 = createHash("sha256").update(contents).digest("hex");
@@ -183,21 +189,22 @@ try {
   const preference = await agentApp.inject({
     method: "PATCH",
     url: "/api/v1/settings",
-    payload: { volume: 0.25 },
+    payload: { volume: 0.25, collageMode: "adaptive" },
   });
   await agentApp.close();
-  if (preference.statusCode !== 200 || preference.json().volume !== 0.25) {
+  if (preference.statusCode !== 200 || preference.json().volume !== 0.25 || preference.json().collageMode !== "adaptive") {
     throw new Error("El agente no guardó la preferencia local");
   }
-  if ((await engine.sync()) !== "unchanged") {
-    throw new Error("La sincronización que vacía el outbox debía iniciar sin cambios");
-  }
   if ((await engine.sync()) !== "updated") {
-    throw new Error("El agente no recibió la versión central de su preferencia");
+    throw new Error("Vaciar el outbox antes de consultar debe devolver la preferencia actualizada");
+  }
+  if ((await engine.sync()) !== "unchanged") {
+    throw new Error("La segunda sincronización debe quedar sin cambios");
   }
   if (
     engine.currentManifest().version !== 3 ||
-    engine.currentManifest().settings.volume !== 0.25
+    engine.currentManifest().settings.volume !== 0.25 ||
+    engine.currentManifest().settings.collageMode !== "adaptive"
   ) {
     throw new Error("La preferencia no se reconcilió como manifiesto versión 3");
   }
@@ -226,6 +233,8 @@ try {
         media: manifest.media.map((item) => item.kind).sort(),
         notifications: telegram.messages.length,
         preferenceReplicated: true,
+        collageModeReplicated: true,
+        mediaDimensionsAvailable: true,
         finalSync: "unchanged",
         telemetry: runtime.rows[0],
       },
@@ -249,6 +258,10 @@ try {
       jobIds,
     ]);
   }
+  await database.query(
+    "DELETE FROM naiskos.jobs WHERE payload->>'chatId'=$1 OR payload->>'frameId'=$2",
+    [telegramId, frame.frameId],
+  );
   await database.query("DELETE FROM naiskos.telegram_users WHERE id=$1", [
     user.id,
   ]);

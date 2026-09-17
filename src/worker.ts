@@ -318,8 +318,8 @@ export class MediaWorker {
             "display",
             ".mp4",
             "video/mp4",
-            null,
-            null,
+            result.display.video.displayWidth,
+            result.display.video.displayHeight,
             result.display.durationSeconds,
           ),
 

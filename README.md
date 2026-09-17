@@ -266,6 +266,24 @@ traza `release.campaign.expired`.
 
 ## Despliegue
 
+Para habilitar collage en bibliotecas antiguas, completar las dimensiones de
+las variantes existentes antes de actualizar el visor. Las miniaturas tienen
+recorte y **no** representan las proporciones del archivo mostrado:
+
+```bash
+npm run backfill:dimensions -- --frame-id <uuid>
+npm run backfill:dimensions -- --frame-id <uuid> --apply
+```
+
+El primer comando sólo inspecciona. El segundo registra dimensiones y aumenta
+la versión de los manifiestos afectados en una sola transacción, con auditoría.
+No altera archivos, hashes, duración ni preferencias. Trabaja secuencialmente
+en lotes de hasta 200 variantes activas con dimensiones ausentes; repetir si
+quedan más. Una segunda ejecución sin pendientes no cambia versiones.
+Los videos nuevos ya guardan las dimensiones al procesarse. En una instalación
+compilada, usar `node dist/dimensions-backfill-main.js` con los mismos argumentos
+y el entorno habitual del servicio. No se requiere migración de esquema.
+
 `deploy/ecosystem.config.cjs` define API, worker y Bot API local para PM2. Sus
 rutas públicas usan `/opt/naiskos-server` y `/var/lib/naiskos-server` como
 ejemplos neutrales; pueden sustituirse mediante variables. Los archivos Nginx
