@@ -261,13 +261,18 @@ afectada y no vuelve a enviar el historial completo.
 
 Cada campaña vence después de 72 horas de forma predeterminada. El plazo se
 puede acotar entre 1 y 720 horas con `--expires-hours`; una campaña vencida
-deja de autorizar descargas y activaciones, pasa a `cancelled` y genera una
-traza `release.campaign.expired`.
+deja de autorizar descargas y nuevas activaciones. Si quedan pendientes, pasa
+a `cancelled` y genera una traza `release.campaign.expired`. Las operaciones
+ya iniciadas conservan su seguimiento; una campaña sólo en observación no se
+cancela por vencimiento. Los botones y el cierre se calculan según toda la flota,
+no sólo según el estado administrativo de la campaña.
 
 ## Despliegue
 
-Para habilitar collage en bibliotecas antiguas, completar las dimensiones de
-las variantes existentes antes de actualizar el visor. Las miniaturas tienen
+Para habilitar collage en bibliotecas antiguas, actualizar primero el agente
+y el visor mediante su paquete firmado y después completar las dimensiones de
+las variantes existentes. Un agente antiguo descarta esos campos y puede
+conservar un ETag actualizado sin los metadatos nuevos. Las miniaturas tienen
 recorte y **no** representan las proporciones del archivo mostrado:
 
 ```bash

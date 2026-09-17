@@ -37,3 +37,45 @@ Despliegue: migración SQL aditiva primero, central después y paquete firmado
 del marco finalmente. Compatible con marcos anteriores, que no confirman salud
 durante observación. No borrar notas antiguas por inferencia. Rollback central
 no exige deshacer las tablas aditivas; conservarlas para mantener pendientes.
+## Coordinación por flota
+
+El estado administrativo de la campaña no determina por sí solo los botones.
+`release-campaign-policy.ts` calcula pendientes, aplicando, aplicados en
+verificación, verificados, fallidos y revertidos a partir de todas las
+asignaciones, incluidas cohortes posteriores. La misma política valida los
+callbacks en el servidor. No existe una excepción para campañas de un marco.
+
+- Pausar/cancelar/reanudar se ofrece sólo si quedan instalaciones pendientes.
+  No detiene operaciones ya iniciadas ni desinstala versiones aplicadas.
+  Los conteos son según el último reporte recibido, no una garantía de corte
+  instantáneo sobre equipos desconectados o autorizaciones ya entregadas.
+- Si todos están aplicando o verificándose, desaparecen esos botones. El texto
+  distingue aplicación de verificación; no interpreta cero verificaciones como
+  cero instalaciones.
+- El servidor bloquea las filas de campaña en orden estable al procesar lotes
+  de reportes y usa el mismo bloqueo para comandos y reconciliación. Un botón
+  obsoleto es rechazado y refresca el mensaje existente.
+- El cierre/avance se reevalúa tras reportes y acciones y cada minuto. Una
+  campaña pausada cuyos marcos terminan no necesita otro reporte para cerrar.
+  Finalizada con incidencias nunca se presenta como éxito total.
+- Los fallos que alcanzan el umbral pausan nuevas instalaciones. Reanudar
+  explícitamente permite seguir con las cohortes pendientes; no reintenta
+  asignaciones fallidas ni borra sus resultados. Si los fallos no alcanzan el
+  umbral, una cohorte terminal puede avanzar según la política existente.
+- Vencer la autorización bloquea sólo nuevas instalaciones: no cancela una
+  observación iniciada. Los resultados tardíos se conservan; no se reinician
+  los marcos ya verificados. Un equipo que llega un día después puede instalar
+  si sigue autorizado, dentro del plazo y en una cohorte habilitada.
+- Una segunda release descargada identifica en el mensaje la release anterior
+  que aún se aplica/verifica; no la llama simplemente «esperando ventana».
+
+Los mensajes de seguimiento conservan su identificador y se editan con texto
+y teclado juntos. La actualización periódica es cada 30 segundos en condiciones
+normales; fallos de Telegram usan la cola durable y respetan `retry_after`.
+No se promete entrega exactamente una vez de un mensaje nuevo si Telegram lo
+acepta pero se pierde su respuesta. Las ediciones sí reutilizan el mismo ID.
+
+Pruebas: `release-campaign-policy.test.ts`, `release-fleet-postgres.test.ts`,
+`release-feedback-postgres.test.ts` y `release-status-order-postgres.test.ts`.
+La coordinación central no necesita cambiar el esquema ni los paquetes del
+marco; conserva la verificación y el rollback locales existentes.

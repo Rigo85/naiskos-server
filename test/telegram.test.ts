@@ -328,6 +328,7 @@ describe("entrada de Telegram", () => {
         id: "11111111-1111-4111-8111-111111111111",
         releaseId: "20260901-test-001",
         status: "draft",
+        assignments: [{frameId:'frame',frameName:'Marco',status:'assigned',error:null,updatedAt:new Date().toISOString()}],
         frames: 1,
         installed: 0,
         failed: 0,

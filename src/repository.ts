@@ -10,6 +10,8 @@ import {
 } from "./notifications.js";
 import { clockAlertState, FullTelemetry, HeartbeatTelemetry } from "./telemetry.js";
 import { queueTelegramMediaNotice } from "./telegram-media-notifications.js";
+import { releaseFleetState } from './release-campaign-policy.js';
+import { reconcileReleaseCampaign } from './release-campaigns.js';
 
 export interface AuthenticatedFrame {
   id: string;
@@ -200,8 +202,10 @@ export interface ReleaseCampaignSummary {
   expiresAt: Date;
   timezone?: string;
   observeMinutes?: number;
+  activeStage?: string;
   assignments?: Array<{ frameId: string; frameName: string; status: string;
-    error: string | null; updatedAt: string; healthConfirmed?: boolean }>;
+    error: string | null; updatedAt: string; healthConfirmed?: boolean;
+    waitingForRelease?: string; stage?: string }>;
 }
 
 export interface SystemUpdatePermit {
@@ -299,9 +303,13 @@ export class Repository {
     const result = await queryable.query<ReleaseCampaignSummary>(
       `SELECT c.id, c.release_id AS "releaseId", c.status,
               c.created_at AS "createdAt", c.expires_at AS "expiresAt",
-              c.timezone,c.observe_minutes AS "observeMinutes",
+              c.timezone,c.observe_minutes AS "observeMinutes",c.active_stage AS "activeStage",
               COALESCE(jsonb_agg(jsonb_build_object('frameId',a.frame_id,'frameName',f.name,
-                'status',a.status,'error',a.last_error,'updatedAt',a.updated_at,'healthConfirmed',a.health_confirmed)
+                'status',a.status,'error',a.last_error,'updatedAt',a.updated_at,'healthConfirmed',a.health_confirmed,
+                'stage',a.stage,'waitingForRelease',(SELECT bc.release_id
+                  FROM naiskos.release_assignments ba JOIN naiskos.release_campaigns bc ON bc.id=ba.campaign_id
+                  WHERE ba.frame_id=a.frame_id AND ba.campaign_id<>a.campaign_id
+                    AND ba.status IN ('activating','observing') ORDER BY ba.assigned_at LIMIT 1))
                 ORDER BY f.name,a.frame_id) FILTER (WHERE a.frame_id IS NOT NULL),'[]') AS assignments,
               count(a.frame_id)::integer AS frames,
               count(*) FILTER (WHERE a.status='installed')::integer AS installed,
@@ -322,6 +330,11 @@ export class Repository {
     actorTelegramId: string,
   ): Promise<boolean> {
     return transaction(this.database, async (client) => {
+      const locked = await client.query('SELECT id FROM naiskos.release_campaigns WHERE id=$1 FOR UPDATE', [campaignId]);
+      if (!locked.rowCount) return false;
+      await reconcileReleaseCampaign(client, campaignId);
+      const campaign = (await this.listReleaseCampaigns(campaignId, client))[0];
+      if (!campaign || !releaseFleetState(campaign).actions.includes(action)) return false;
       const result = await client.query(
         action === "approve"
           ? `UPDATE naiskos.release_campaigns SET status='approved',
@@ -343,22 +356,34 @@ export class Repository {
           JSON.stringify({ campaignId, actorTelegramId }),
         ],
       );
+      await reconcileReleaseCampaign(client, campaignId);
       return true;
     });
+  }
+
+  async reconcileReleaseCampaigns(): Promise<void> {
+    const rows = await this.database.query<{id:string}>(
+      "SELECT id FROM naiskos.release_campaigns WHERE status IN ('approved','paused') ORDER BY id");
+    for (const row of rows.rows) {
+      await transaction(this.database, client => reconcileReleaseCampaign(client, row.id));
+    }
   }
 
   async expireReleaseCampaigns(
     now = new Date(),
   ): Promise<Array<{ campaignId: string; releaseId: string }>> {
     return transaction(this.database, async (client) => {
-      const expired = await client.query<{ id: string; releaseId: string }>(
-        `UPDATE naiskos.release_campaigns
-            SET status='cancelled'
-          WHERE status IN ('draft','approved','paused') AND expires_at <= $1
-        RETURNING id, release_id AS "releaseId"`,
+      const candidates = await client.query<{ id: string; releaseId: string }>(
+        `SELECT id,release_id AS "releaseId" FROM naiskos.release_campaigns
+          WHERE status IN ('draft','approved','paused') AND expires_at <= $1 ORDER BY id FOR UPDATE`,
         [now],
       );
-      for (const campaign of expired.rows) {
+      const expired: Array<{campaignId:string;releaseId:string}> = [];
+      for (const campaign of candidates.rows) {
+        await reconcileReleaseCampaign(client, campaign.id);
+        const state = (await this.listReleaseCampaigns(campaign.id, client))[0];
+        if (!state || !['draft','approved','paused'].includes(state.status) || releaseFleetState(state,now).pending===0) continue;
+        await client.query("UPDATE naiskos.release_campaigns SET status='cancelled' WHERE id=$1", [campaign.id]);
         await client.query(
           `INSERT INTO naiskos.audit_log (action,details)
            VALUES ('release.campaign.expired',$1)`,
@@ -368,11 +393,9 @@ export class Repository {
             expiredAt: now.toISOString(),
           })],
         );
+        expired.push({campaignId:campaign.id,releaseId:campaign.releaseId});
       }
-      return expired.rows.map((campaign) => ({
-        campaignId: campaign.id,
-        releaseId: campaign.releaseId,
-      }));
+      return expired;
     });
   }
 
@@ -2309,6 +2332,13 @@ export class Repository {
     transitions: TelemetryAlertTransition[] = [],
   ): Promise<string[]> {
     return transaction(this.database, async (client) => {
+      // Fixed lock order across batches; callbacks, reports and reconciliation
+      // serialize on the same campaign rows before inspecting assignments.
+      const releaseCampaignIds = [...new Set(events.slice(0, 100)
+        .filter(e => e.type === 'software.release.status' && isUuid(String(e.campaignId ?? '')))
+        .map(e => String(e.campaignId)))].sort();
+      if (releaseCampaignIds.length) await client.query(
+        'SELECT id FROM naiskos.release_campaigns WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [releaseCampaignIds]);
       const accepted: string[] = [];
       let frameName: string | null = null;
       for (const event of events.slice(0, 100)) {
@@ -2641,12 +2671,14 @@ export class Repository {
               deployed: number;
               failed: number;
               threshold: number;
+              pending: number;
             }>(
               `SELECT count(*) FILTER (
                         WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
                            <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
                       )::integer AS deployed,
                       count(*) FILTER (WHERE a.status IN ('failed','rolled_back'))::integer AS failed,
+                      count(*) FILTER (WHERE a.status IN ('assigned','downloading','verified','awaiting_window'))::integer AS pending,
                       c.failure_threshold_percent::float8 AS threshold
                  FROM naiskos.release_campaigns c
                  JOIN naiskos.release_assignments a ON a.campaign_id=c.id
@@ -2655,7 +2687,7 @@ export class Repository {
             );
             const summary = failure.rows[0];
             if (
-              summary && summary.deployed > 0 &&
+              summary && summary.pending > 0 && summary.deployed > 0 &&
               (summary.failed / summary.deployed) * 100 >= summary.threshold
             ) {
               await client.query(
@@ -2671,57 +2703,8 @@ export class Repository {
                 threshold: summary.threshold,
               });
             }
-          } else if (status === "installed") {
-            const campaign = await client.query<{
-              activeStage: "pilot" | "ten-percent" | "remainder";
-              remaining: number;
-              nextStage: "ten-percent" | "remainder" | null;
-            }>(
-              `SELECT c.active_stage AS "activeStage",
-                      count(*) FILTER (
-                        WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
-                           <= CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
-                          AND a.status <> 'installed'
-                      )::integer AS remaining,
-                      CASE min(
-                        CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
-                      ) FILTER (
-                        WHERE CASE a.stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
-                           > CASE c.active_stage WHEN 'pilot' THEN 1 WHEN 'ten-percent' THEN 2 ELSE 3 END
-                      ) WHEN 2 THEN 'ten-percent' WHEN 3 THEN 'remainder' ELSE NULL END AS "nextStage"
-                 FROM naiskos.release_campaigns c
-                 JOIN naiskos.release_assignments a ON a.campaign_id=c.id
-                WHERE c.id=$1 AND c.status='approved'
-                GROUP BY c.id`,
-              [campaignId],
-            );
-            const current = campaign.rows[0];
-            if (current && current.remaining === 0) {
-              const next = current.nextStage;
-              if (next) {
-                await client.query(
-                  `UPDATE naiskos.release_campaigns SET active_stage=$2 WHERE id=$1`,
-                  [campaignId, next],
-                );
-                await this.audit(client, "release.campaign.stage-advanced", frameId, null, {
-                  campaignId,
-                  releaseId,
-                  from: current.activeStage,
-                  to: next,
-                });
-              } else {
-                await client.query(
-                  `UPDATE naiskos.release_campaigns
-                      SET status='completed', completed_at=now() WHERE id=$1`,
-                  [campaignId],
-                );
-                await this.audit(client, "release.campaign.completed", frameId, null, {
-                  campaignId,
-                  releaseId,
-                });
-              }
-            }
           }
+          await reconcileReleaseCampaign(client, campaignId);
         } else if (kind === "system.maintenance.status") {
           const mode = String(event.mode ?? "");
           const status = String(event.status ?? "");

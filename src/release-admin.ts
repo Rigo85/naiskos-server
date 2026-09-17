@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 
 import { loadConfig } from "./config.js";
 import { createDatabase, transaction } from "./db.js";
+import { Repository } from './repository.js';
 
 const HELP = `Naiskos software releases
 
@@ -169,19 +170,10 @@ try {
     }).values;
     const campaignId = required(args["campaign-id"], "--campaign-id");
     if (!isUuid(campaignId)) throw new Error("--campaign-id no es un UUID.");
-    const result = await database.query(
-      `UPDATE naiskos.release_campaigns
-          SET status='approved', approved_at=now(), approved_by='admin-cli'
-        WHERE id=$1 AND status='draft' AND expires_at > now()`,
-      [campaignId],
-    );
-    if (!result.rowCount) {
-      throw new Error("La campaña no existe, no está en borrador o ya venció.");
+    const approved = await new Repository(database).transitionReleaseCampaign(campaignId, 'approve', 'admin-cli');
+    if (!approved) {
+      throw new Error("La campaña ya no admite aprobación según su autorización y sus marcos pendientes.");
     }
-    await database.query(
-      `INSERT INTO naiskos.audit_log (action,details) VALUES ('release.campaign.approved',$1)`,
-      [JSON.stringify({ campaignId })],
-    );
     console.log(`Campaña aprobada: ${campaignId}`);
   } else if (command === "list") {
     const result = await database.query(

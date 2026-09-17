@@ -50,7 +50,7 @@ describe.skipIf(!db)('feedback de releases durable',()=>{
    await repo.applyDeviceEvents(frame.frameId,[failed,failed,event('failed'),event('observing',{healthConfirmed:true})]);
    expect((await repo.listReleaseCampaigns(campaign))[0]?.assignments![0]?.status).toBe('failed');
    const events=(await db.query('SELECT * FROM naiskos.release_feedback_events WHERE campaign_id=$1 ORDER BY id',[campaign])).rows;
-   expect(events.map(e=>e.details.status)).toEqual(['failed','paused']);
+   expect(events.map(e=>e.details.status)).toEqual(['failed','completed']);
    sendFailure=new TelegramApiError('Too many requests',120);
    await feedback.runOnce();
    const pending=(await db.query(`SELECT * FROM naiskos.release_feedback_deliveries WHERE campaign_id=$1 AND delivery_key<>'status'`,[campaign])).rows;
@@ -60,16 +60,16 @@ describe.skipIf(!db)('feedback de releases durable',()=>{
    await db.query(`UPDATE naiskos.release_feedback_deliveries SET available_at=now() WHERE campaign_id=$1`,[campaign]);
    await new ReleaseFeedback(db,transport,new Set(['99'])).runOnce();
    expect(messages.filter(m=>m.includes('Naiskos · Falló'))).toHaveLength(1);
-   expect(messages.filter(m=>m.includes('pausada con fallos'))).toHaveLength(1);
+   expect(messages.filter(m=>m.includes('Finalizada con incidencias'))).toHaveLength(1);
    const count=messages.length;await feedback.runOnce();expect(messages).toHaveLength(count);
-   await repo.transitionReleaseCampaign(campaign,'cancel','99');await feedback.runOnce();
-   expect(edits.at(-1)).toContain('No desinstala lo aplicado');
-   expect(messages.at(-1)).toContain('Cancelar no desinstala');
+   expect(await repo.transitionReleaseCampaign(campaign,'cancel','99')).toBe(false);
+   await feedback.runOnce();
+   expect(edits.at(-1)).toContain('Finalizada con incidencias');
    // Rollbacks don't leak transactional events.
    const client=await db.connect();
-   try {await client.query('BEGIN');await client.query(`UPDATE naiskos.release_campaigns SET status='completed' WHERE id=$1`,[campaign]);await client.query('ROLLBACK');}
+   try {await client.query('BEGIN');await client.query(`UPDATE naiskos.release_campaigns SET status='paused' WHERE id=$1`,[campaign]);await client.query('ROLLBACK');}
    finally {client.release();}
-   expect((await db.query(`SELECT 1 FROM naiskos.release_feedback_events WHERE campaign_id=$1 AND details->>'status'='completed'`,[campaign])).rowCount).toBe(0);
+   expect((await db.query(`SELECT 1 FROM naiskos.release_feedback_events WHERE campaign_id=$1 AND details->>'status'='paused'`,[campaign])).rowCount).toBe(0);
   } finally {
    await db.query("DELETE FROM naiskos.audit_log WHERE frame_id=$1 OR details->>'campaignId'=$2",[frame.frameId,campaign]);
    await db.query('DELETE FROM naiskos.release_campaigns WHERE id=$1',[campaign]);

@@ -526,7 +526,7 @@ export class TelegramHandler {
         query.id,
         changed ? (transition === 'cancel'
           ? 'Cancelada: no desinstala lo aplicado ni detiene una operación iniciada.'
-          : 'Campaña actualizada.') : "La campaña ya cambió o la transición no es válida.",
+          : 'Acción aplicada a nuevas instalaciones; las iniciadas continúan.') : "La acción ya no corresponde al estado de los marcos. Se actualizará el mensaje.",
       );
       if (this.releaseFeedback && query.message) {
         await this.releaseFeedback.show(query.message.chat.id,targetId,query.message.message_id);

@@ -53,7 +53,11 @@ export class ReleaseFeedback {
      'SELECT details,created_at FROM naiskos.release_feedback_events WHERE id=$1 AND campaign_id=$2',
      [key.slice(6),campaignId])).rows[0];
     if(!event) throw Error('Evento de release no encontrado');
-    text=releaseEventText(event.details,event.created_at);
+    const summary=(await new Repository(this.db).listReleaseCampaigns(campaignId,client))[0];
+    text=releaseEventText({...event.details,
+      ...(summary && (event.details.status==='completed' || event.details.finalSummary) ? {
+        frames:summary.frames, installed:summary.installed, failed:summary.failed,
+      }: {})},event.created_at);
    }
    const fingerprint=createHash('sha256').update(JSON.stringify([text,markup])).digest('hex');
    if(key==='status' && row.fingerprint===fingerprint) return;

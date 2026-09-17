@@ -20,6 +20,7 @@ async function monitorFleet(): Promise<void> {
   monitorRunning = true;
   try {
     // Expiry notifications now use the same transactional delivery queue.
+    await fleetRepository.reconcileReleaseCampaigns();
     await fleetRepository.expireReleaseCampaigns();
     const monthlyCampaign = await fleetRepository.ensureMonthlySystemUpdateCampaign();
     if (monthlyCampaign) {
