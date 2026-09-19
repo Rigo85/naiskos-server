@@ -230,6 +230,16 @@ verifica hashes y sincronización y limpia sus datos al finalizar.
 
 ## Releases y campañas
 
+La consulta de software distingue ausencia de asignación (`204`, permite
+retirar una preparación pendiente) de una operación en activación/observación
+(`409`, `software_operation_in_progress`, conserva sus archivos). La consulta
+recomprueba la operación después de buscar la asignación. Esto protege también
+agentes anteriores al baseline 16: sus errores HTTP no eliminan la descarga.
+Se debe desplegar esta compatibilidad central **antes** de la campaña 15→16.
+No otorga autorización nueva ni prolonga campañas vencidas/canceladas: la
+revalidación previa a activar mantiene sus condiciones originales. Los estados
+terminales y el feedback por marco siguen siendo independientes de esta señal.
+
 La migración `018_release_feedback.sql` agrega el seguimiento durable en
 Telegram: fase por marco, causas, mensaje canónico y avisos con reintentos.
 El agente con baseline 15 confirma salud durante la observación sin adelantar

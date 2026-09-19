@@ -245,6 +245,13 @@ export class Repository {
     return oneOrNull(result.rows);
   }
 
+  async softwareOperationInProgress(frameId: string): Promise<boolean> {
+    const result = await this.database.query(
+      `SELECT 1 FROM naiskos.release_assignments
+        WHERE frame_id=$1 AND status IN ('activating','observing') LIMIT 1`, [frameId]);
+    return Boolean(result.rowCount);
+  }
+
   async getDesiredSoftware(frameId: string): Promise<SoftwareAssignment | null> {
     const result = await this.database.query<SoftwareAssignment>(
       `SELECT a.campaign_id AS "campaignId", r.release_id AS "releaseId",

@@ -26,6 +26,15 @@ async function fleet(states:string[],run:(f:{repo:Repository;id:string;release:s
  }
 }
 describe.skipIf(!db)('coordinación de flotas y Telegram',()=>{
+ it('distingue una operación iniciada de ausencia/cancelación sin cambiar autorización',async()=>{
+  await fleet(['activating','observing','assigned','installed','failed'],async({repo,id,frames})=>{
+   for(const [i,frame] of frames.entries()) expect(await repo.softwareOperationInProgress(frame)).toBe(i<2);
+   await db!.query("UPDATE naiskos.release_campaigns SET status='cancelled' WHERE id=$1",[id]);
+   expect(await repo.softwareOperationInProgress(frames[0]!)).toBe(true);
+   expect(await repo.getDesiredSoftware(frames[0]!)).toBeNull();
+   expect(await repo.getDesiredSoftware(frames[2]!)).toBeNull();
+  });
+ });
  it('rechaza botones viejos para muchos marcos observando, actualiza el mismo mensaje y quita su teclado',async()=>{
   await fleet(Array(10).fill('assigned'),async({repo,id})=>{
    const sends:unknown[]=[],edits:unknown[]=[];

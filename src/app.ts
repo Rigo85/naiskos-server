@@ -322,7 +322,17 @@ export async function buildApp(
       const frame = await authenticatedFrame(request, repository);
       if (!frame || frame.id !== request.params.frameId)
         return reply.code(401).send({ error: "No autorizado" });
+      // 204 means no authorization, not "another local phase is using the files".
+      // Legacy agents also preserve staging on a non-2xx response. This protects
+      // their upgrade to the shared-lock baseline without relaxing authorization.
+      if (await repository.softwareOperationInProgress(frame.id)) {
+        return reply.code(409).send({ code: "software_operation_in_progress" });
+      }
       const assignment = await repository.getDesiredSoftware(frame.id);
+      // Recheck after the query: an activating report can arrive between them.
+      if (await repository.softwareOperationInProgress(frame.id)) {
+        return reply.code(409).send({ code: "software_operation_in_progress" });
+      }
       if (!assignment) return reply.code(204).send();
       const release = encodeURIComponent(assignment.releaseId);
       const base = `${config.publicUrl}/api/v1/software/releases/${release}`;
