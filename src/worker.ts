@@ -14,6 +14,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
+import { extractBandColors } from "./band-colors.js";
 
 import { ServerConfig } from "./config.js";
 import { Database, transaction } from "./db.js";
@@ -48,6 +49,7 @@ interface ClaimedJob {
 }
 
 interface StoredVariant {
+  bandColors: [string, string] | null;
   purpose: "original" | "display" | "poster" | "thumbnail";
   sha256: Buffer;
   storagePath: string;
@@ -405,6 +407,8 @@ export class MediaWorker {
     }
     const details = await stat(destination);
     return {
+      bandColors: (purpose === "display" || purpose === "poster") && mimeType.startsWith("image/")
+        ? await extractBandColors(source) : null,
       purpose,
       sha256,
       storagePath,
@@ -445,12 +449,13 @@ export class MediaWorker {
         await client
           .query(
             `INSERT INTO naiskos.media_variants
-             (id, media_id, purpose, width, height, duration_seconds, mime_type, extension, sha256, size_bytes, storage_path, rotation_degrees)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             (id, media_id, purpose, width, height, duration_seconds, mime_type, extension, sha256, size_bytes, storage_path, rotation_degrees, band_colors)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
            ON CONFLICT (media_id, purpose, rotation_degrees) DO UPDATE SET
              width=EXCLUDED.width, height=EXCLUDED.height, duration_seconds=EXCLUDED.duration_seconds,
              mime_type=EXCLUDED.mime_type, extension=EXCLUDED.extension, sha256=EXCLUDED.sha256,
-             size_bytes=EXCLUDED.size_bytes, storage_path=EXCLUDED.storage_path
+             size_bytes=EXCLUDED.size_bytes, storage_path=EXCLUDED.storage_path,
+             band_colors=EXCLUDED.band_colors
            RETURNING id`,
             [
               id,
@@ -465,6 +470,7 @@ export class MediaWorker {
               variant.sizeBytes,
               variant.storagePath,
               variant.rotationDegrees,
+              variant.bandColors ? JSON.stringify(variant.bandColors) : null,
             ],
           )
           .then((result) =>
@@ -705,8 +711,8 @@ export class MediaWorker {
         await client.query(
           `INSERT INTO naiskos.media_variants
              (id, media_id, purpose, width, height, duration_seconds, mime_type,
-              extension, sha256, size_bytes, storage_path, rotation_degrees)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+              extension, sha256, size_bytes, storage_path, rotation_degrees, band_colors)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
            ON CONFLICT (media_id, purpose, rotation_degrees) DO NOTHING`,
           [
             randomUUID(),
@@ -721,6 +727,7 @@ export class MediaWorker {
             variant.sizeBytes,
             variant.storagePath,
             variant.rotationDegrees,
+            variant.bandColors ? JSON.stringify(variant.bandColors) : null,
           ],
         );
       }
@@ -730,6 +737,20 @@ export class MediaWorker {
   private async activateRotation(
     job: ClaimedJob & { payload: RotateMediaJobPayload },
   ): Promise<void> {
+    // Cached rotations (including zero degrees) may predate palette generation.
+    // Enrich before activation, outside the publishing transaction; never re-encode.
+    const paletteSource = await this.database.query<{ id: string; storagePath: string; sha256: Buffer }>(
+      `SELECT v.id, v.storage_path AS "storagePath", v.sha256 FROM naiskos.media_variants v
+         JOIN naiskos.media m ON m.id=v.media_id
+        WHERE v.media_id=$1 AND v.rotation_degrees=$2 AND v.band_colors IS NULL
+          AND v.purpose=CASE WHEN m.kind='video' THEN 'poster' ELSE 'display' END`,
+      [job.payload.mediaId, job.payload.rotationDegrees]);
+    for (const variant of paletteSource.rows) {
+      const colors = await extractBandColors(path.join(this.config.storageRoot, variant.storagePath));
+      if (colors) await this.database.query(
+        `UPDATE naiskos.media_variants SET band_colors=$2 WHERE id=$1 AND sha256=$3 AND band_colors IS NULL`,
+        [variant.id, JSON.stringify(colors), variant.sha256]);
+    }
     await transaction(this.database, async (client) => {
       const superseded = await client.query(
         `SELECT 1 FROM naiskos.jobs

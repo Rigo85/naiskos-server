@@ -164,6 +164,7 @@ describe.skipIf(!database || !photoPath || !videoPath)(
           );
           expect(manifest.version).toBe(2);
           const media = manifest.media as Array<Record<string, unknown>>;
+          expect(media.every((item) => Array.isArray(item.bandColors) && item.bandColors.length === 2)).toBe(true);
           expect(media).toHaveLength(2);
           expect(new Set(media.map((item) => item.kind))).toEqual(
             new Set(["photo", "video"]),

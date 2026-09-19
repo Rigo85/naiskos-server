@@ -21,9 +21,9 @@ describe("orden de manifiesto", () => {
     ).toEqual(["older", "newer"]);
   });
 
-  it("mantiene aleatorio estable por versión", () => {
+  it("mantiene aleatorio estable aunque cambie la versión por metadatos decorativos", () => {
     expect(orderManifestMedia([older, newer], "shuffle", 7)).toEqual(
-      orderManifestMedia([older, newer], "shuffle", 7),
+      orderManifestMedia([newer, older], "shuffle", 99),
     );
   });
 });

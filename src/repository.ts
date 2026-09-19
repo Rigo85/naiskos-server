@@ -1472,6 +1472,7 @@ export class Repository {
     const mediaResult = await this.database.query<Record<string, unknown>>(
       `SELECT m.id, m.kind, v.id AS "variantId", v.extension, m.caption,
               v.width, v.height,
+              CASE WHEN m.kind='video' THEN pv.band_colors ELSE v.band_colors END AS "bandColors",
               u.display_name AS "senderName",
               m.created_at AS "receivedAt", fm.fit_mode AS "fitMode",
               fm.rotation_degrees AS "rotationDegrees",
@@ -2987,7 +2988,7 @@ export class Repository {
 export function orderManifestMedia<T extends Record<string, unknown>>(
   media: T[],
   order: string,
-  version: number,
+  _version: number,
 ): T[] {
   const result = [...media];
   const timestamp = (item: T, field: string) => {
@@ -3002,7 +3003,7 @@ export function orderManifestMedia<T extends Record<string, unknown>>(
   if (order === "shuffle") {
     return result.sort(
       (a, b) =>
-        stableRank(String(a.id), version) - stableRank(String(b.id), version),
+        stableRank(String(a.id), 0) - stableRank(String(b.id), 0) || String(a.id).localeCompare(String(b.id)),
     );
   }
   return result.sort(
