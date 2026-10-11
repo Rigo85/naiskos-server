@@ -12,6 +12,7 @@ import { clockAlertState, FullTelemetry, HeartbeatTelemetry } from "./telemetry.
 import { queueTelegramMediaNotice } from "./telegram-media-notifications.js";
 import { releaseFleetState } from './release-campaign-policy.js';
 import { reconcileReleaseCampaign } from './release-campaigns.js';
+import { queueRecoveryNotices, validRecoveryEvent } from './recovery-notifications.js';
 
 export interface AuthenticatedFrame {
   id: string;
@@ -2338,6 +2339,7 @@ export class Repository {
     frameId: string,
     events: Array<Record<string, unknown>>,
     transitions: TelemetryAlertTransition[] = [],
+    recoveryAdminIds: string[] = [],
   ): Promise<string[]> {
     return transaction(this.database, async (client) => {
       // Fixed lock order across batches; callbacks, reports and reconciliation
@@ -2353,6 +2355,7 @@ export class Repository {
         const id = String(event.id ?? "");
         const kind = String(event.type ?? "");
         if (!isUuid(id) || !kind) continue;
+        if (kind === 'system.recovery.status' && !validRecoveryEvent(event)) continue;
         const inserted = await client.query(
           `INSERT INTO naiskos.device_events (id, frame_id, kind, payload, occurred_at)
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`,
@@ -2366,7 +2369,13 @@ export class Repository {
         );
         accepted.push(id);
         if (!inserted.rowCount) continue;
-        if (kind === "settings.updated" && event.settings) {
+        if (kind === 'system.recovery.status') {
+          const frame = await client.query<{ name: string }>('SELECT name FROM naiskos.frames WHERE id=$1', [frameId]);
+          await queueRecoveryNotices(client, frameId, frame.rows[0]?.name ?? frameId, event, recoveryAdminIds);
+          await upsertFrameNotification(client, { frameId, kind, severity: event.status === 'recovered' ? 'info' : 'warning',
+            title: event.status === 'recovered' ? 'Naiskos recuperado' : 'Recuperación del equipo',
+            message: String(event.reason), dedupeKey: `recovery-${event.incidentId}`, details: event });
+        } else if (kind === "settings.updated" && event.settings) {
           await client.query(
             `UPDATE naiskos.frames SET settings=$2,
                     settings_revision=settings_revision+1,

@@ -14,6 +14,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
+import { deliverRecoveryNotice } from './recovery-notifications.js';
 import { extractBandColors } from "./band-colors.js";
 
 import { ServerConfig } from "./config.js";
@@ -112,6 +113,7 @@ export class MediaWorker {
     this.busy = true;
     try {
       await this.recoverAbandonedJobs();
+      if (await deliverRecoveryNotice(this.database, this.workerId, this.telegram)) return true;
       const notification = await claimTelegramMediaNoticeBatch(
         this.database,
         this.workerId,

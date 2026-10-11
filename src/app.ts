@@ -430,6 +430,7 @@ export async function buildApp(
       frame.id,
       request.body.events,
       transitions,
+      [...config.telegramAdminIds],
     );
     if (transitions.length) {
       void notifyTelemetryTransitions(
