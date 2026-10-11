@@ -416,6 +416,17 @@ export async function buildApp(
     },
   );
 
+  app.post<{ Params: { frameId: string }; Body: { events?: Array<Record<string, unknown>> } }>(
+    "/api/v1/frames/:frameId/recovery-events", async (request, reply) => {
+      const frame = await authenticatedFrame(request, repository);
+      if (!frame || frame.id !== request.params.frameId) return reply.code(401).send({ error: "No autorizado" });
+      const events = request.body?.events;
+      if (!Array.isArray(events) || events.length > 32 || events.some(e => !e || e.type !== 'system.recovery.status'))
+        return reply.code(400).send({ error: 'Eventos de recuperación inválidos' });
+      const accepted = await repository.applyDeviceEvents(frame.id, events, [], [...config.telegramAdminIds]);
+      return { schemaVersion: 1, accepted };
+    });
+
   app.post<{
     Params: { frameId: string };
     Body: { events?: Array<Record<string, unknown>> };

@@ -5,6 +5,9 @@ positive persistent sequence, timestamp, status and bounded reason. The frame
 authenticates through its existing token. Statuses: `recovering`,
 `reboot-requested`, `verifying`, `recovered`, `failed`, `limited`.
 
+The dedicated `/api/v1/frames/:frameId/recovery-events` route returns a versioned
+ACK. Older central versions return 404, leaving the frame queue intact rather
+than acknowledging an unhandled event through the generic event route.
 The transaction recording a new device event also enqueues one
 `telegram.recovery` job per configured administrator. Only then is the event
 acknowledged. Event UUID deduplication prevents repeated queue creation.

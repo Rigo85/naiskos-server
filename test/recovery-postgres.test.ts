@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { buildApp } from '../src/app.js';
+import { loadConfig } from '../src/config.js';
 import { Repository } from '../src/repository.js';
 import { PostgresProvisioningStore, ProvisioningService } from '../src/admin/provisioning.js';
 import { deliverRecoveryNotice } from '../src/recovery-notifications.js';
@@ -17,8 +19,19 @@ describe.skipIf(!db)('entrega persistente de emergencias', () => {
     const event = (sequence: number, status: string) => ({ id: randomUUID(), type: 'system.recovery.status',
       at: new Date().toISOString(), incidentId, bootId, sequence, status, reason: 'Test' });
     const a = event(1, 'reboot-requested'), b = event(2, 'verifying'), c = event(3, 'recovered');
+    vi.stubEnv('DATABASE_URL', process.env.TEST_DATABASE_URL!);
+    const config = loadConfig(); config.telegramAdminIds = new Set(['99']);
+    vi.unstubAllEnvs();
+    const app = await buildApp(config, db);
     try {
-      await repo.applyDeviceEvents(frame.frameId, [a, b, c, a], [], ['99', '99']);
+      const request = { method: 'POST' as const, url: `/api/v1/frames/${frame.frameId}/recovery-events`,
+        headers: { authorization: `Bearer ${frame.agentToken}` }, payload: { events: [a, b, c, a] } };
+      expect((await app.inject({ ...request, headers: {} })).statusCode).toBe(401);
+      expect((await app.inject({ ...request, url: `/api/v1/frames/${other.frameId}/recovery-events` })).statusCode).toBe(401);
+      expect((await app.inject({ ...request, payload: { events: [{ ...a, type: 'settings.updated' }] } })).statusCode).toBe(400);
+      const response = await app.inject(request);
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ schemaVersion: 1, accepted: [a.id, b.id, c.id, a.id] });
       expect((await db.query(`SELECT id FROM naiskos.jobs WHERE kind='telegram.recovery' AND payload->>'frameId'=$1`, [frame.frameId])).rowCount).toBe(3);
       await deliverRecoveryNotice(db, 'test-worker', { sendMessage: async () => { throw new TelegramApiError('429', 120); } });
       const pending = await db.query(`SELECT attempts,status,available_at>now() AS delayed FROM naiskos.jobs WHERE payload->>'eventId'=$1`, [a.id]);
@@ -39,6 +52,7 @@ describe.skipIf(!db)('entrega persistente de emergencias', () => {
       await repo.applyDeviceEvents(frame.frameId, [a, b, c], [], ['99']);
       expect(await deliverRecoveryNotice(db, 'test-worker', transport)).toBe(false);
     } finally {
+      await app.close();
       await db.query(`DELETE FROM naiskos.jobs WHERE kind='telegram.recovery' AND payload->>'frameId'=ANY($1::text[])`, [[frame.frameId, other.frameId]]);
       await db.query('DELETE FROM naiskos.device_events WHERE frame_id=ANY($1::uuid[])', [[frame.frameId, other.frameId]]);
       await db.query('DELETE FROM naiskos.frames WHERE id=ANY($1::uuid[])', [[frame.frameId, other.frameId]]);
