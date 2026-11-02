@@ -11,4 +11,7 @@ it('valida estados y conserva identidad/fecha del incidente en el aviso', () => 
   expect(validRecoveryEvent({ ...event, sequence: -1 })).toBe(false);
   expect(validRecoveryEvent({ ...event, bootId: 'bad' })).toBe(false);
   expect(validRecoveryEvent({ ...event, at: 'invalid' })).toBe(false);
+  expect(validRecoveryEvent({ ...event, status: 'reboot-uncertain' })).toBe(true);
+  expect(recoveryText('Marco', {...event,status:'reboot-uncertain'},Date.parse(event.at))).toContain('confirmación pendiente');
+  expect(recoveryText('Marco', event,Date.parse(event.at)+121000)).toContain('retraso');
 });

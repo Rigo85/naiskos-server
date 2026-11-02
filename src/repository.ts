@@ -2375,6 +2375,15 @@ export class Repository {
           await upsertFrameNotification(client, { frameId, kind, severity: event.status === 'recovered' ? 'info' : 'warning',
             title: event.status === 'recovered' ? 'Naiskos recuperado' : 'Recuperación del equipo',
             message: String(event.reason), dedupeKey: `recovery-${event.incidentId}`, details: event });
+        } else if (kind === 'telemetry.outbox.compacted') {
+          if (Number.isSafeInteger(event.count) && Number(event.count) > 0 &&
+              typeof event.firstAt === 'string' && Number.isFinite(Date.parse(event.firstAt)) &&
+              typeof event.lastAt === 'string' && Number.isFinite(Date.parse(event.lastAt))) {
+            await upsertFrameNotification(client, { frameId, kind, severity: 'info',
+              title: 'Telemetría repetitiva resumida',
+              message: `Último resumen: ${event.count} registros de diagnóstico agrupados al llenarse su cola. No se eliminaron fotos ni videos.`,
+              dedupeKey: 'telemetry-outbox-compacted', details: event });
+          }
         } else if (kind === "settings.updated" && event.settings) {
           await client.query(
             `UPDATE naiskos.frames SET settings=$2,

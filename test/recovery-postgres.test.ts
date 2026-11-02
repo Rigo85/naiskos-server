@@ -18,7 +18,8 @@ describe.skipIf(!db)('entrega persistente de emergencias', () => {
     const incidentId = randomUUID(), bootId = randomUUID();
     const event = (sequence: number, status: string) => ({ id: randomUUID(), type: 'system.recovery.status',
       at: new Date().toISOString(), incidentId, bootId, sequence, status, reason: 'Test' });
-    const a = event(1, 'reboot-requested'), b = event(2, 'verifying'), c = event(3, 'recovered');
+    const a = event(1, 'reboot-uncertain'), b = event(2, 'verifying'), c = event(3, 'recovered');
+    a.at=new Date(Date.now()-180_000).toISOString();
     vi.stubEnv('DATABASE_URL', process.env.TEST_DATABASE_URL!);
     const config = loadConfig(); config.telegramAdminIds = new Set(['99']);
     vi.unstubAllEnvs();
@@ -48,9 +49,15 @@ describe.skipIf(!db)('entrega persistente de emergencias', () => {
       await db.query(`UPDATE naiskos.jobs SET available_at=now() WHERE payload->>'frameId'=$1`, [frame.frameId]);
       for (let n = 0; n < 3; n++) await deliverRecoveryNotice(db, 'test-worker', transport);
       expect(messages.slice(1).map(text => text.split('\n')[1])).toEqual([
-        'Reinicio de emergencia solicitado', 'Equipo reiniciado; verificando Naiskos', 'Funcionamiento de Naiskos recuperado']);
+        'Reinicio solicitado; confirmación pendiente', 'Equipo reiniciado; verificando Naiskos', 'Funcionamiento de Naiskos recuperado']);
+      expect(messages[1]).toContain('Entrega diferida');
       await repo.applyDeviceEvents(frame.frameId, [a, b, c], [], ['99']);
       expect(await deliverRecoveryNotice(db, 'test-worker', transport)).toBe(false);
+      const summary={id:randomUUID(),type:'telemetry.outbox.compacted',at:new Date().toISOString(),
+        count:700,firstAt:a.at,lastAt:c.at,counts:{'viewer.collage:scene-committed':700},sealed:true};
+      expect(await repo.applyDeviceEvents(frame.frameId,[summary,summary])).toEqual([summary.id,summary.id]);
+      const stored=await db.query("SELECT details FROM naiskos.frame_notifications WHERE frame_id=$1 AND kind='telemetry.outbox.compacted'",[frame.frameId]);
+      expect(stored.rows).toHaveLength(1);expect(stored.rows[0].details.count).toBe(700);
     } finally {
       await app.close();
       await db.query(`DELETE FROM naiskos.jobs WHERE kind='telegram.recovery' AND payload->>'frameId'=ANY($1::text[])`, [[frame.frameId, other.frameId]]);

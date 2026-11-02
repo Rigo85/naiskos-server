@@ -6,6 +6,7 @@ import { TelegramApiError } from './telegram.js';
 const titles: Record<string, string> = {
   recovering: 'Recuperación del visor en curso',
   'reboot-requested': 'Reinicio de emergencia solicitado',
+  'reboot-uncertain': 'Reinicio solicitado; confirmación pendiente',
   verifying: 'Equipo reiniciado; verificando Naiskos',
   recovered: 'Funcionamiento de Naiskos recuperado',
   failed: 'No se pudo confirmar la recuperación',
@@ -19,11 +20,13 @@ export function validRecoveryEvent(event: Record<string, unknown>): boolean {
     typeof event.reason === 'string' && event.reason.length <= 1000 &&
     typeof event.at === 'string' && Number.isFinite(Date.parse(event.at));
 }
-export function recoveryText(frameName: string, event: Record<string, unknown>): string {
+export function recoveryText(frameName: string, event: Record<string, unknown>, now = Date.now()): string {
   const time = new Intl.DateTimeFormat('es-PE', { timeZone: 'America/Lima',
     dateStyle: 'short', timeStyle: 'medium' }).format(new Date(String(event.at)));
   return `${event.status === 'recovered' ? '✅' : '⚠️'} ${frameName.slice(0, 150)}\n` +
-    `${titles[String(event.status)]}\n${event.reason}\nOcurrió: ${time} (Lima)\nIncidente: ${event.incidentId}`;
+    `${titles[String(event.status)]}\n${event.reason}\nOcurrió: ${time} (Lima)\n` +
+    (now - Date.parse(String(event.at)) > 120_000 ? 'Aviso recibido con retraso; puede haber eventos posteriores de este incidente.\n' : '') +
+    `Incidente: ${event.incidentId}`;
 }
 // Same transaction as device_events: an ACK implies the delivery work is durable.
 export async function queueRecoveryNotices(client: PoolClient, frameId: string, name: string,
@@ -32,12 +35,13 @@ export async function queueRecoveryNotices(client: PoolClient, frameId: string, 
     `INSERT INTO naiskos.jobs(id,kind,payload,status,available_at)
      VALUES($1,'telegram.recovery',$2,'pending',now())`,
     [randomUUID(), JSON.stringify({ chatId, frameId, incidentId: event.incidentId,
-      eventId: event.id, sequence: event.sequence, text: recoveryText(name, event) })]);
+      eventId: event.id, sequence: event.sequence, occurredAt: event.at,
+      text: recoveryText(name, event, Date.parse(String(event.at))) })]);
 }
 export async function deliverRecoveryNotice(db: Database, workerId: string,
   telegram: { sendMessage(chatId: string, text: string): Promise<unknown> }): Promise<boolean> {
   const job = await transaction(db, async client => {
-    const result = await client.query<{ id: string; attempts: number; payload: { chatId: string; text: string } }>(
+    const result = await client.query<{ id: string; attempts: number; payload: { chatId: string; text: string; occurredAt?: string } }>(
       `WITH candidate AS (
          SELECT j.id FROM naiskos.jobs j WHERE j.kind='telegram.recovery'
            AND j.status='pending' AND j.available_at<=now()
@@ -53,7 +57,9 @@ export async function deliverRecoveryNotice(db: Database, workerId: string,
   });
   if (!job) return false;
   try {
-    await telegram.sendMessage(job.payload.chatId, job.payload.text);
+    const delayed = job.payload.occurredAt && Date.now() - Date.parse(job.payload.occurredAt) > 120_000;
+    await telegram.sendMessage(job.payload.chatId, job.payload.text + (delayed
+      ? '\nEntrega diferida: consulte la hora del evento y los avisos posteriores de este incidente.' : ''));
     await db.query(`UPDATE naiskos.jobs SET status='succeeded',completed_at=now(),
       locked_at=NULL,locked_by=NULL,last_error=NULL WHERE id=$1 AND locked_by=$2`, [job.id, workerId]);
   } catch (error) {
