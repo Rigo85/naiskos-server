@@ -2356,6 +2356,10 @@ export class Repository {
         const kind = String(event.type ?? "");
         if (!isUuid(id) || !kind) continue;
         if (kind === 'system.recovery.status' && !validRecoveryEvent(event)) continue;
+        // Serialize this stream per frame (including concurrent/late batches),
+        // without taking a fleet-wide lock or changing the database schema.
+        if (kind === 'system.updates.checked' || kind === 'system.maintenance.status') await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`system-update-check:${frameId}`]);
         const inserted = await client.query(
           `INSERT INTO naiskos.device_events (id, frame_id, kind, payload, occurred_at)
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`,
@@ -2814,7 +2818,11 @@ export class Repository {
             details: { mode, status, packagesChanged, packagesPending, rebootRequired, campaignId, attemptId, errorCode, deviceEventId: id },
           }));
           if (status === "succeeded") {
-            transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
+            const newerCheck = await client.query(`SELECT 1 FROM naiskos.device_events
+              WHERE frame_id=$1 AND kind='system.updates.checked' AND COALESCE(payload->>'error','')=''
+                AND COALESCE(payload->>'status','succeeded')='succeeded'
+                AND jsonb_typeof(payload->'count')='number' AND occurred_at > $2::timestamptz LIMIT 1`, [frameId,event.at]);
+            if (!newerCheck.rowCount) transitions.push(...await this.transitionTelemetryAlert(client, frameId, frameName, {
               active: packagesPending > 0 || rebootRequired,
               recover: packagesPending === 0 && !rebootRequired,
               kind: "system.updates-pending",
@@ -2854,14 +2862,35 @@ export class Repository {
             });
           }
         } else if (kind === "system.updates.checked") {
-          const count = Number(event.count);
+          const count = typeof event.count === 'number' ? event.count : null;
           const rebootRequired = event.rebootRequired === true;
-          const error = typeof event.error === "string" ? event.error : null;
-          if (!Number.isSafeInteger(count) || count < 0 || count > 10_000) {
+          const error = typeof event.error === "string" && event.error ? event.error : null;
+          const status = event.status ?? (error ? 'failed' : 'succeeded');
+          const sequence = event.checkSequence;
+          if (!['succeeded','failed','deferred'].includes(String(status)) ||
+              (status === 'succeeded' && (count === null || !Number.isSafeInteger(count) || count < 0 || count > 10_000 || error)) ||
+              (status !== 'succeeded' && !error) ||
+              (sequence !== undefined && (!Number.isSafeInteger(sequence) || Number(sequence) <= 0))) {
             await this.audit(client, `${kind}.ignored`, frameId, null, {
               deviceEventId: id,
-              reason: "invalid-count",
+              reason: "invalid-result",
             });
+            continue;
+          }
+          // Deferred checks neither certify recovery nor overwrite a known count.
+          if (status === 'deferred') continue;
+          const newer = await client.query(`SELECT 1 FROM naiskos.device_events
+            WHERE frame_id=$1 AND kind=$2 AND id<>$3
+              AND COALESCE(payload->>'status', CASE WHEN COALESCE(payload->>'error','')='' THEN 'succeeded' ELSE 'failed' END) IN ('succeeded','failed')
+              AND (COALESCE(payload->>'error','')<>'' OR
+                CASE WHEN jsonb_typeof(payload->'count')='number' THEN
+                  payload->>'count' ~ '^[0-9]{1,5}$' AND (payload->>'count')::numeric<=10000 ELSE false END)
+              AND (CASE WHEN $4::bigint IS NOT NULL AND payload->>'checkSequence' ~ '^[0-9]{1,16}$'
+                    THEN (payload->>'checkSequence')::numeric >= $4::bigint
+                    ELSE occurred_at > $5::timestamptz END)
+            LIMIT 1`, [frameId,kind,id,sequence ?? null,event.at]);
+          if (newer.rowCount) {
+            await this.audit(client, `${kind}.ignored`, frameId, null, { deviceEventId: id, reason: 'stale-result' });
             continue;
           }
           if (frameName === null) {
@@ -2883,15 +2912,21 @@ export class Repository {
               title: "Falló la consulta de actualizaciones del SO",
               message: error ?? "La consulta diaria volvió a responder.",
               dedupeKey: "system-update-check-failed",
-              details: { count, rebootRequired, deviceEventId: id },
+              details: { count, rebootRequired, checkedAt: event.at, checkSequence: sequence, deviceEventId: id },
             },
           ));
+          // A delayed check must not restore the package count from before a
+          // successful maintenance. Its own failure/recovery remains independent.
+          const laterMaintenance = await client.query(`SELECT 1 FROM naiskos.device_events
+            WHERE frame_id=$1 AND kind='system.maintenance.status' AND payload->>'status'='succeeded'
+              AND occurred_at > $2::timestamptz LIMIT 1`, [frameId,event.at]);
+          if (laterMaintenance.rowCount) continue;
           transitions.push(...await this.transitionTelemetryAlert(
             client,
             frameId,
             frameName,
             {
-              active: !error && (count > 0 || rebootRequired),
+              active: !error && ((count ?? 0) > 0 || rebootRequired),
               recover: !error && count === 0 && !rebootRequired,
               kind: "system.updates-pending",
               severity: "warning",
@@ -2902,7 +2937,7 @@ export class Repository {
                 ? `Hay ${count} paquete${count === 1 ? "" : "s"} pendiente${count === 1 ? "" : "s"} y el sistema solicita reinicio.`
                 : "Los parches de seguridad se instalarán de noche; las actualizaciones generales siguen la campaña mensual escalonada.",
               dedupeKey: "system-updates-pending",
-              details: { count, rebootRequired, deviceEventId: id },
+              details: { count, rebootRequired, checkedAt: event.at, checkSequence: sequence, deviceEventId: id },
             },
           ));
         } else if (
